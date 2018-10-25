@@ -32,7 +32,7 @@ bash pve-5.2-diff-backup-addon apply
 
 # Notes
 * Get new version
-`grep -A 1 'version_text' /usr/share/perl5/PVE/pvecfg.pm | tail -1 | cut -d "'" -f 2 | cut -d "/" -f 1`
+```grep -A 1 'version_text' /usr/share/perl5/PVE/pvecfg.pm | tail -1 | cut -d "'" -f 2 | cut -d "/" -f 1```
 
 * Pull latest (not-patched) files
 ```
@@ -56,7 +56,33 @@ mv temp/PVE/VZDump/QemuServer.pm ./PVE/VZDump/QemuServer.pm
 rm -rf temp
 ```
 
-* Commit, branch and patch
+* Commit and branch
+```
 git add .
 git commit -am "$version"
 git checkout -b $version
+```
+
+* Diff-patch and commit
+```
+git commit -am "$version patched"
+git diff HEAD^ > diff-patches/diff.patch
+git add .
+git commit -am "$version diff.patch"
+git push origin $version
+```
+
+* Merge to master
+```
+git checkout master
+git merge $version
+```
+
+* Build patch-script from diff.patch
+
+* Commid and push upstream
+```
+git add .
+git commit -am "$version patch script"
+git push origin master
+```
