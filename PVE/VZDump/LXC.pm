@@ -296,7 +296,7 @@ sub assemble {
 }
 
 sub archive {
-    my ($self, $task, $vmid, $filename, $comp) = @_;
+    my ($self, $task, $vmid, $filename, $comp, $basefile) = @_;
 
     my $disks = $task->{disks};
     my @sources;
@@ -356,6 +356,7 @@ sub archive {
 
     my $bwl = $opts->{bwlimit}*1024; # bandwidth limit for cstream
     push @$cmd, [ 'cstream', '-t', $bwl ] if $opts->{bwlimit};
+    push @$cmd, [ 'pve-xdelta3', '-q', '-e', '-c', '-s', $basefile ] if $basefile;
     push @$cmd, [ split(/\s+/, $comp) ] if $comp;
 
     if ($opts->{stdout}) {
