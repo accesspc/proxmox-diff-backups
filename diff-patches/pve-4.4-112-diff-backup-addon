@@ -1,0 +1,525 @@
+#!/bin/bash
+
+echo "Proxmox VE 4.4-112 - differential backup support, v3"
+echo "Robertas Reiciunas, https://reiciunas.lt/, accesspc@gmail.com"
+echo " based on Kamil Trzcinski, http://ayufan.eu/, ayufan@ayufan.eu"
+echo " modified and tested on pve-manager/5.2-5/eb24855a (running kernel: 4.13.16-2-pve)"
+echo ""
+
+function pve_manager_patch() {
+cat <<"EOF"
+diff --git a/pve-manager/js/pvemanagerlib.js b/pve-manager/js/pvemanagerlib.js
+index 3744f3a..f66102a 100644
+--- a/pve-manager/js/pvemanagerlib.js
++++ b/pve-manager/js/pvemanagerlib.js
+@@ -34074,11 +34074,30 @@ Ext.define('PVE.dc.BackupEdit', {
+ 	    {
+ 		xtype: 'pveBackupModeSelector',
+ 		fieldLabel: gettext('Mode'),
+ 		value: 'snapshot',
+ 		name: 'mode'
+-	    },
++		},
++		{
++        xtype: 'numberfield',
++        fieldLabel: gettext('Max Backups'),
++        name: 'maxfiles',
++        minValue: 0,
++        maxValue: 365,
++        value: me.create ? '1' : undefined,
++        allowBlank: false
++        },
++        {
++        xtype: 'numberfield',
++        fieldLabel: gettext('Full Backup Every'),
++        name: 'fullbackup',
++        emptyText : gettext('Days'),
++        minValue: 0,
++        maxValue: 60,
++        value: me.create ? '0' : undefined,
++        allowBlank: true
++		},
+ 	    {
+ 		xtype: 'pvecheckbox',
+ 		fieldLabel: gettext('Enable'),
+ 		name: 'enabled',
+ 		uncheckedValue: 0,
+EOF
+}
+
+function pve_perl_patch() {
+cat <<"EOF"
+commit c47cf8ffb392d193a75cd038d36ee1ca19cc1351
+Author: Kamil Trzciński <ayufan@ayufan.eu>
+Date:   Fri Jan 22 00:38:29 2016 +0100
+
+    PVE-4.4-patch
+
+diff --git a/PVE/LXC/Create.pm b/PVE/LXC/Create.pm
+index d93159c..274033a 100644
+--- a/PVE/LXC/Create.pm
++++ b/PVE/LXC/Create.pm
+@@ -83,10 +83,18 @@ sub restore_archive {
+     # *sigh*, gnu...
+     push @$cmd, '--skip-old-files';
+     push @$cmd, '--anchored';
+     push @$cmd, '--exclude' , './dev/*';
+ 
++    if (my $fullbackup = PVE::Storage::get_full_backup($archive)) {
++        print "extracting from differential archive, using full backup '$fullbackup'\n";
++        $cmd = [
++            [ "pve-xdelta3", "-q", "-d", "-c", "-R", "-s", $fullbackup, $archive ],
++            [ @$userns_cmd, 'tar', 'xpf', '-', '--numeric-owner', '--totals', '--sparse', '-C', $rootdir, '--skip-old-files', '--anchored', '--exclude' , './dev/*' ]
++        ];
++    }
++
+     if ($archive eq '-') {
+ 	print "extracting archive from STDIN\n";
+ 	eval { PVE::Tools::run_command($cmd, input => "<&STDIN"); };
+     } else {
+ 	print "extracting archive '$archive'\n";
+diff --git a/PVE/QemuServer.pm b/PVE/QemuServer.pm
+index e33a0ab..64c6b1b 100644
+--- a/PVE/QemuServer.pm
++++ b/PVE/QemuServer.pm
+@@ -5149,12 +5149,22 @@ sub pci_dev_group_bind_to_vfio {
+ sub tar_archive_read_firstfile {
+     my $archive = shift;
+ 
+     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
+ 
++    my $cmd = undef;
++
++    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
++        my $fullbackup = $archive;
++        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
++        $cmd = "-|pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar t|";
++    } else {
++        $cmd = "-|tar tf '$archive'|";
++    }
++
+     # try to detect archive type first
+-    my $pid = open (my $fh, '-|', 'tar', 'tf', $archive) ||
++    my $pid = open (my $fh, $cmd) ||
+ 	die "unable to open file '$archive'\n";
+     my $firstfile = <$fh>;
+     kill 15, $pid;
+     close $fh;
+ 
+@@ -5458,10 +5468,20 @@ sub restore_vma_archive {
+ 	    die "unknown compression method '$comp'\n";
+ 	}
+ 
+     }
+ 
++    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
++         my $fullbackup = $archive;
++        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
++        print "extracting from differential archive, using full backup '$fullbackup'\n";
++        $readfrom = '-';
++        my $qfullbackup = PVE::Tools::shellquote($fullbackup);
++        my $qarchive = PVE::Tools::shellquote($archive);
++        $uncomp = "pve-xdelta3 -q -d -c -R -s '$qfullbackup' '$qarchive'|";
++    }
++
+     my $tmpdir = "/var/tmp/vzdumptmp$$";
+     rmtree $tmpdir;
+ 
+     # disable interrupts (always do cleanups)
+     local $SIG{INT} =
+@@ -5726,12 +5746,21 @@ sub restore_tar_archive {
+     $tocmd .= ' --prealloc' if $opts->{prealloc};
+     $tocmd .= ' --info' if $opts->{info};
+ 
+     # tar option "xf" does not autodetect compression when read from STDIN,
+     # so we pipe to zcat
+-    my $cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
+-	PVE::Tools::shellquote("--to-command=$tocmd");
++    my $cmd = undef;
++
++    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
++        my $fullbackup = $archive;
++        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
++        print "extracting from differential archive, using full backup '$fullbackup'\n";
++        $cmd = "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar x " . PVE::Tools::shellquote("--to-command=$tocmd");
++    } else {
++    $cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
++        PVE::Tools::shellquote("--to-command=$tocmd");
++    }
+ 
+     my $tmpdir = "/var/tmp/vzdumptmp$$";
+     mkpath $tmpdir;
+ 
+     local $ENV{VZDUMP_TMPDIR} = $tmpdir;
+diff --git a/PVE/Storage.pm b/PVE/Storage.pm
+index eb7000f..fca2866 100644
+--- a/PVE/Storage.pm
++++ b/PVE/Storage.pm
+@@ -462,11 +462,11 @@ sub path_to_volume_id {
+ 	    my $name = $1;
+ 	    return ('vztmpl', "$sid:vztmpl/$name");
+ 	} elsif ($path =~ m!^$privatedir/(\d+)$!) {
+ 	    my $vmid = $1;
+ 	    return ('rootdir', "$sid:rootdir/$vmid");
+-	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!) {
++	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!) {
+ 	    my $name = $1;
+ 	    return ('iso', "$sid:backup/$name");
+ 	}
+     }
+ 
+@@ -805,11 +805,11 @@ sub template_list {
+ 		    next if $fn !~ m!/([^/]+\.tar\.([gx]z))$!;
+ 
+ 		    $info = { volid => "$sid:vztmpl/$1", format => "t$2" };
+ 
+ 		} elsif ($tt eq 'backup') {
+-		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!;
++		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!;
+ 
+ 		    $info = { volid => "$sid:backup/$1", format => $2 };
+ 		}
+ 
+ 		$info->{size} = -s $fn;
+@@ -1315,17 +1315,34 @@ sub foreach_volid {
+ 	   }
+        }
+     }
+ }
+ 
++sub get_full_backup {
++    my ($archive) = @_;
++    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
++        my $fullbackup = $archive;
++        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
++        return $fullbackup;
++    }
++    return undef;
++}
++
+ sub extract_vzdump_config_tar {
+     my ($archive, $conf_re) = @_;
+ 
+     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
+ 
+-    my $pid = open(my $fh, '-|', 'tar', 'tf', $archive) ||
+-       die "unable to open file '$archive'\n";
++    my $pid;
++    my $fh;
++
++    if (my $fullbackup = get_full_backup($archive)) {
++        $pid = open($fh, '-|', 'bash', '-c' , "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' | tar tf -")
++            || die "unable to open file '$archive'\n";
++    } else {
++        $pid = open($fh, '-|', 'tar', 'tf', $archive) || die "unable to open file '$archive'\n";
++    }
+ 
+     my $file;
+     while (defined($file = <$fh>)) {
+ 	if ($file =~ $conf_re) {
+ 	    $file = $1; # untaint
+@@ -1344,11 +1361,19 @@ sub extract_vzdump_config_tar {
+     my $out = sub {
+ 	my $output = shift;
+ 	$raw .= "$output\n";
+     };
+ 
+-    PVE::Tools::run_command(['tar', '-xpOf', $archive, $file, '--occurrence'], outfunc => $out);
++    my $cmd = ['tar', '-xpOf', $archive, $file, '--occurrence'];
++    if (my $fullbackup = get_full_backup($archive)) {
++        $cmd = [
++            [ "bash", "-c", "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' || true" ],
++            [ 'tar', '-xpOf', '-', $file, '--occurrence' ]
++        ];
++    }
++
++    PVE::Tools::run_command($cmd, outfunc => $out);
+ 
+     return wantarray ? ($raw, $file) : $raw;
+ }
+ 
+ sub extract_vzdump_config_vma {
+diff --git a/PVE/Storage/Plugin.pm b/PVE/Storage/Plugin.pm
+index 6e73547..1bd1df9 100644
+--- a/PVE/Storage/Plugin.pm
++++ b/PVE/Storage/Plugin.pm
+@@ -379,11 +379,11 @@ sub parse_volname {
+ 	return ('iso', $1);
+     } elsif ($volname =~ m!^vztmpl/([^/]+\.tar\.[gx]z)$!) {
+ 	return ('vztmpl', $1);
+     } elsif ($volname =~ m!^rootdir/(\d+)$!) {
+ 	return ('rootdir', $1, $1);
+-    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo)))$!) {
++    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo)))$!) {
+ 	my $fn = $1;
+ 	if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
+ 	    return ('backup', $fn, $2);
+ 	}
+ 	return ('backup', $fn);
+diff --git a/PVE/VZDump.pm b/PVE/VZDump.pm
+index 0bd942b..ec44fe1 100644
+--- a/PVE/VZDump.pm
++++ b/PVE/VZDump.pm
+@@ -8,10 +8,11 @@ use PVE::SafeSyslog;
+ use IO::File;
+ use IO::Select;
+ use IPC::Open3;
+ use POSIX qw(strftime);
+ use File::Path;
++use File::Basename;
+ use PVE::RPCEnvironment;
+ use PVE::Storage;
+ use PVE::Cluster qw(cfs_read_file);
+ use Time::localtime;
+ use Time::Local;
+@@ -170,10 +171,17 @@ my $confdesc = {
+ 	description => "Maximal number of backup files per guest system.",
+ 	optional => 1,
+ 	minimum => 1,
+ 	default => 1,
+     },
++    fullbackup => {
++    type => 'integer',
++    description => "Maximal days of validity for full backups to be used for creating differentials.",
++    optional => 1,
++    minimum => 0,
++    default => 0,
++    },
+     remove => {
+ 	type => 'boolean',
+ 	description => "Remove old backup files if there are more than 'maxfiles' backup files.",
+ 	optional => 1,
+ 	default => 1,
+@@ -747,10 +755,26 @@ sub get_backup_file_list {
+ 	}
+     }
+ 
+     return $bklist;
+ }
++
++sub get_differential_backup_file_list {
++    my ($dir, $bkname, $exclude_fn) = @_;
++
++    my $bklist = [];
++    foreach my $fn (<$dir/${bkname}-*>) {
++    next if $exclude_fn && $fn eq $exclude_fn;
++		if ($fn =~ m!/(${bkname}--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?)$!) {
++			$fn = "$dir/$1"; # untaint
++			my $t = timelocal ($7, $6, $5, $4, $3 - 1, $2 - 1900);
++			push @$bklist, [$fn, $t];
++		}
++    }
++
++    return $bklist;
++}
+  
+ sub exec_backup_task {
+     my ($self, $task) = @_;
+ 	 
+     my $opts = $self->{opts};
+@@ -795,11 +819,38 @@ sub exec_backup_task {
+ 	    my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
+ 	    die "only $maxfiles backup(s) allowed - please consider to remove old backup files.\n" 
+ 		if scalar(@$bklist) >= $maxfiles;
+ 	}
+ 
+-	my $logfile = $task->{logfile} = "$opts->{dumpdir}/$basename.log";
++    my $fullbackup = undef;
++    if ($opts->{fullbackup} && !$opts->{stdout}) {
++        my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
++        $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
++        my $mintime = timelocal ($lt->sec, $lt->min, $lt->hour,
++        $lt->mday, $lt->mon, $lt->year) -
++        $opts->{fullbackup} * 24 * 60 * 60 -
++        12 * 60 * 60; # - 12h just to make sure that on last day we create full backup
++
++        foreach my $d (@$bklist) {
++			next if $mintime > $d->[1];
++
++			$fullbackup = $d->[0];
++			$basename = basename($fullbackup);
++			$basename = sprintf "${basename}--differential-%04d_%02d_%02d-%02d_%02d_%02d",
++				$lt->year + 1900, $lt->mon + 1, $lt->mday,
++				$lt->hour, $lt->min, $lt->sec;
++			my $ext = ".vcdiff";
++
++			debugmsg ('info', "doing differential backup against '$fullbackup'");
++			last;
++        }
++
++        debugmsg ('info', "doing full backup, because no backup found in last $opts->{fullbackup} day(s)")
++        if !$fullbackup;
++    }
++
++    my $logfile = $task->{logfile} = "$opts->{dumpdir}/$basename.log";
+ 
+ 	my $ext = $vmtype eq 'qemu' ? '.vma' : '.tar';
+ 	my ($comp, $comp_ext) = compressor_info($opts);
+ 	if ($comp && $comp_ext) {
+ 	    $ext .= ".${comp_ext}";
+@@ -975,11 +1026,11 @@ sub exec_backup_task {
+ 	    $self->run_hook_script ('backup-end', $task, $logfd);
+ 	    return;
+ 	}
+ 
+ 	debugmsg ('info', "creating archive '$task->{tarfile}'", $logfd);
+-	$plugin->archive($task, $vmid, $task->{tmptar}, $comp);
++	$plugin->archive($task, $vmid, $task->{tmptar}, $comp, $fullbackup);
+ 
+ 	rename ($task->{tmptar}, $task->{tarfile}) ||
+ 	    die "unable to rename '$task->{tmptar}' to '$task->{tarfile}'\n";
+ 
+ 	# determine size
+@@ -987,21 +1038,31 @@ sub exec_backup_task {
+ 	my $cs = format_size ($task->{size}); 
+ 	debugmsg ('info', "archive file size: $cs", $logfd);
+ 
+ 	# purge older backup
+ 
+-	if ($maxfiles && $opts->{remove}) {
++	if ($maxfiles && $opts->{remove} && !$fullbackup) {
+ 	    my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname, $task->{tarfile});
+ 	    $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
+ 
+ 	    while (scalar (@$bklist) >= $maxfiles) {
+ 		my $d = pop @$bklist;
+ 		debugmsg ('info', "delete old backup '$d->[0]'", $logfd);
+ 		unlink $d->[0];
+ 		my $logfn = $d->[0];
+ 		$logfn =~ s/\.(tgz|((tar|vma)(\.(gz|lzo))?))$/\.log/;
+ 		unlink $logfn;
++
++        my $dbklist = get_differential_backup_file_list($opts->{dumpdir}, basename($d->[0]));
++
++        foreach my $df (@$dbklist) {
++            debugmsg ('info', "delete old differential backup '$df->[0]'", $logfd);
++            unlink $df->[0];
++            $logfn = $df->[0];
++            $logfn =~ s/\.(vcdiff(\.(gz|lzo))?)$/\.log/;
++            unlink $logfn;
++        }
+ 	    }
+ 	}
+ 
+ 	$self->run_hook_script ('backup-end', $task, $logfd);
+     };
+diff --git a/PVE/VZDump/LXC.pm b/PVE/VZDump/LXC.pm
+index fafffc6..48fdcbe 100644
+--- a/PVE/VZDump/LXC.pm
++++ b/PVE/VZDump/LXC.pm
+@@ -295,11 +295,11 @@ sub assemble {
+ 	$task->{fw} = 1;
+     }
+ }
+ 
+ sub archive {
+-    my ($self, $task, $vmid, $filename, $comp) = @_;
++    my ($self, $task, $vmid, $filename, $comp, $basefile) = @_;
+ 
+     my $disks = $task->{disks};
+     my @sources;
+ 
+     if ($task->{mode} eq 'stop') {
+@@ -355,10 +355,11 @@ sub archive {
+ 
+     my $cmd = [ $tar ];
+ 
+     my $bwl = $opts->{bwlimit}*1024; # bandwidth limit for cstream
+     push @$cmd, [ 'cstream', '-t', $bwl ] if $opts->{bwlimit};
++    push @$cmd, [ 'pve-xdelta3', '-q', '-e', '-c', '-s', $basefile ] if $basefile;
+     push @$cmd, [ split(/\s+/, $comp) ] if $comp;
+ 
+     if ($opts->{stdout}) {
+ 	$self->cmd($cmd, output => ">&" . fileno($opts->{stdout}));
+     } else {
+diff --git a/PVE/VZDump/QemuServer.pm b/PVE/VZDump/QemuServer.pm
+index da3ee06..11a8d47 100644
+--- a/PVE/VZDump/QemuServer.pm
++++ b/PVE/VZDump/QemuServer.pm
+@@ -235,11 +235,11 @@ sub assemble {
+ 
+     PVE::Tools::file_copy($firewall_src, $firewall_dest) if -f $firewall_src;
+ }
+ 
+ sub archive {
+-    my ($self, $task, $vmid, $filename, $comp) = @_;
++    my ($self, $task, $vmid, $filename, $comp, $basefile) = @_;
+ 
+     my $conffile = "$task->{tmpdir}/qemu-server.conf";
+     my $firewall = "$task->{tmpdir}/qemu-server.fw";
+ 
+     my $opts = $self->{vzdump}->{opts};
+@@ -345,10 +345,19 @@ sub archive {
+ 	} else {
+ 	    $outfh = IO::File->new($filename, "w") ||
+ 		die "unable to open file '$filename' - $!\n";
+ 	}
+ 
++    if ($basefile) {
++        my $basecmd = "pve-xdelta3 -e -q -c -s '$basefile'";
++        if ($comp) {
++        $comp = "$basecmd|$comp";
++        } else {
++        $comp = $basecmd;
++        }
++    }
++
+ 	my $outfileno;
+ 	if ($comp) {
+ 	    my @pipefd = POSIX::pipe();
+ 	    $cpid = fork();
+ 	    die "unable to fork worker - $!" if !defined($cpid);
+EOF
+}
+
+function patch_revert() {
+        patch --reverse --quiet -p1 --batch --ignore-whitespace -d $*
+}
+
+function patch_apply() {
+        patch --forward -p1 --batch --ignore-whitespace -d $*
+}
+
+case $1 in
+revert)
+        if pve_manager_patch | patch_revert /usr/share/ --dry-run
+        then
+                pve_manager_patch | patch_revert /usr/share/
+                echo "RESTORED: /usr/share/"
+        fi
+        if pve_perl_patch | patch_revert /usr/share/perl5/ --dry-run
+        then
+                pve_perl_patch | patch_revert /usr/share/perl5/
+                echo "RESTORED: /usr/share/perl5/"
+        fi
+        echo ""
+        service pveproxy restart
+        service pvedaemon restart
+        ;;
+
+apply)
+        if pve_manager_patch | patch_apply /usr/share/ --dry-run --batch
+        then
+                pve_manager_patch | patch_apply /usr/share/
+                echo "PATCHED: /usr/share/"
+        fi
+        if pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch
+        then
+                pve_perl_patch | patch_apply /usr/share/perl5/
+                echo "PATCHED: /usr/share/perl5/"
+        fi
+        echo ""
+        service pveproxy restart
+        service pvedaemon restart
+        ;;
+
+test)
+        pve_manager_patch | patch_apply /usr/share/ --dry-run --batch || true
+        pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch || true
+        ;;
+
+*)
+        echo "usage: $0 [apply|revert|test]"
+        exit 1
+        ;;
+esac
