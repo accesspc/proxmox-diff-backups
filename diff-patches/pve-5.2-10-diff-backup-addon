@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Proxmox VE 5.2 - differential backup support, v1.0"
+echo "Proxmox VE 5.2 - differential backup support, v1.1"
 echo "Robertas Reiciunas, https://reiciunas.lt/, accesspc@gmail.com"
 echo " based on Kamil Trzcinski, http://ayufan.eu/, ayufan@ayufan.eu"
 echo " modified and tested on pve-manager/5.2-10/6f892b40 (running kernel: 4.15.18-1-pve)"
@@ -403,15 +403,15 @@ function patch_apply() {
 
 case $1 in
 revert)
-        if pve_manager_patch | patch_revert /usr/share/pve-manager/ --dry-run
+        if pve_manager_patch | patch_revert /usr/share/ --dry-run
         then
-                pve_manager_patch | patch_revert /usr/share/pve-manager/
-                echo "RESTORED: /usr/share/pve-manager/"
+                pve_manager_patch | patch_revert /usr/share/
+                echo "RESTORED: /usr/share/"
         fi
-        if pve_perl_patch | patch_revert /usr/share/perl5/PVE/ --dry-run
+        if pve_perl_patch | patch_revert /usr/share/perl5/ --dry-run
         then
-                pve_perl_patch | patch_revert /usr/share/perl5/PVE/
-                echo "RESTORED: /usr/share/perl5/PVE/"
+                pve_perl_patch | patch_revert /usr/share/perl5/
+                echo "RESTORED: /usr/share/perl5/"
         fi
         echo ""
         service pveproxy restart
@@ -419,15 +419,15 @@ revert)
         ;;
 
 apply)
-        if pve_manager_patch | patch_apply /usr/share/pve-manager/ --dry-run --batch
+        if pve_manager_patch | patch_apply /usr/share/ --dry-run --batch
         then
-                pve_manager_patch | patch_apply /usr/share/pve-manager/
-                echo "PATCHED: /usr/share/pve-manager/"
+                pve_manager_patch | patch_apply /usr/share/
+                echo "PATCHED: /usr/share/"
         fi
-        if pve_perl_patch | patch_apply /usr/share/perl5/PVE/ --dry-run --batch
+        if pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch
         then
-                pve_perl_patch | patch_apply /usr/share/perl5/PVE/
-                echo "PATCHED: /usr/share/perl5/PVE/"
+                pve_perl_patch | patch_apply /usr/share/perl5/
+                echo "PATCHED: /usr/share/perl5/"
         fi
         echo ""
         service pveproxy restart
@@ -435,8 +435,8 @@ apply)
         ;;
 
 test)
-        pve_manager_patch | patch_apply /usr/share/pve-manager/ --dry-run --batch || true
-        pve_perl_patch | patch_apply /usr/share/perl5/PVE/ --dry-run --batch || true
+        pve_manager_patch | patch_apply /usr/share/ --dry-run --batch || true
+        pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch || true
         ;;
 
 *)
