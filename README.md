@@ -15,7 +15,9 @@ qemu-server:		/usr/share/perl5/PVE/VZDump/QemuServer.pm
 ```
 
 # HELP - in case patch/revert doesn't work any more
+```
 apt install --reinstall libpve-storage-perl pve-container pve-manager qemu-server
+```
 
 # Installation
 * Update Proxmox up to 5.2 version
@@ -32,7 +34,9 @@ bash pve-5.2-diff-backup-addon apply
 
 # Notes
 * Get new version
-```grep -A 1 'version_text' /usr/share/perl5/PVE/pvecfg.pm | tail -1 | cut -d "'" -f 2 | cut -d "/" -f 1```
+```
+grep -A 1 'version_text' /usr/share/perl5/PVE/pvecfg.pm | tail -1 | cut -d "'" -f 2 | cut -d "/" -f 1
+```
 
 * Pull latest (not-patched) files
 ```
