@@ -34,14 +34,23 @@ use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr);
 use PVE::QemuServer::Memory;
 use PVE::QemuServer::USB qw(parse_usb_device);
 use PVE::QemuServer::Cloudinit;
+use PVE::SysFSTools;
 use PVE::Systemd;
 use Time::HiRes qw(gettimeofday);
 use File::Copy qw(copy);
 use URI::Escape;
 
 my $EDK2_FW_BASE = '/usr/share/pve-edk2-firmware/';
-my $OVMF_CODE = "$EDK2_FW_BASE/OVMF_CODE.fd";
-my $OVMF_VARS = "$EDK2_FW_BASE/OVMF_VARS.fd";
+my $OVMF = {
+    x86_64 => [
+	"$EDK2_FW_BASE/OVMF_CODE.fd",
+	"$EDK2_FW_BASE/OVMF_VARS.fd"
+    ],
+    aarch64 => [
+	"$EDK2_FW_BASE/AAVMF_CODE.fd",
+	"$EDK2_FW_BASE/AAVMF_VARS.fd"
+    ],
+};
 
 my $qemu_snap_storage = {rbd => 1, sheepdog => 1};
 
@@ -83,7 +92,7 @@ PVE::JSONSchema::register_standard_option('pve-qm-image-format', {
 PVE::JSONSchema::register_standard_option('pve-qemu-machine', {
 	description => "Specifies the Qemu machine type.",
 	type => 'string',
-	pattern => '(pc|pc(-i440fx)?-\d+\.\d+(\.pxe)?|q35|pc-q35-\d+\.\d+(\.pxe)?)',
+	pattern => '(pc|pc(-i440fx)?-\d+\.\d+(\.pxe)?|q35|pc-q35-\d+\.\d+(\.pxe)?|virt(?:-\d+\.\d+)?)',
 	maxLength => 40,
 	optional => 1,
 });
@@ -109,8 +118,6 @@ mkdir $var_run_tmpdir;
 
 my $lock_dir = "/var/lock/qemu-server";
 mkdir $lock_dir;
-
-my $pcisysfs = "/sys/bus/pci";
 
 my $cpu_vendor_list = {
     # Intel CPUs
@@ -220,6 +227,24 @@ my $agent_fmt = {
 	type => 'boolean',
 	optional => 1,
 	default => 0
+    },
+};
+
+my $vga_fmt = {
+    type => {
+	description => "Select the VGA type.",
+	type => 'string',
+	default => 'std',
+	optional => 1,
+	default_key => 1,
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 serial0 serial1 serial2 serial3 std virtio vmware)],
+    },
+    memory => {
+	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
+	type => 'integer',
+	optional => 1,
+	minimum => 4,
+	maximum => 512,
     },
 };
 
@@ -431,17 +456,16 @@ EODESC
     },
     vga => {
 	optional => 1,
-	type => 'string',
-	description => "Select the VGA type.",
-        verbose_description => "Select the VGA type. If you want to use high resolution" .
-	    " modes (>= 1280x1024x16) then you should use the options " .
-	    "'std' or 'vmware'. Default is 'std' for win8/win7/w2k8, and " .
-	    "'cirrus' for other OS types. The 'qxl' option enables the SPICE " .
-	    "display sever. For win* OS you can select how many independent " .
-	    "displays you want, Linux guests can add displays them self. " .
-	    "You can also run without any graphic card, using a serial device" .
-	    " as terminal.",
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 serial0 serial1 serial2 serial3 std virtio vmware)],
+	type => 'string', format => $vga_fmt,
+	description => "Configure the VGA hardware.",
+	verbose_description => "Configure the VGA Hardware. If you want to use ".
+	    "high resolution modes (>= 1280x1024x16) you may need to increase " .
+	    "the vga memory option. Since QEMU 2.9 the default VGA display type " .
+	    "is 'std' for all OS types besides some Windows versions (XP and " .
+	    "older) which use 'cirrus'. The 'qxl' option enables the SPICE " .
+	    "display server. For win* OS you can select how many independent " .
+	    "displays you want, Linux guests can add displays them self.\n".
+	    "You can also run without any graphic card, using a serial device as terminal.",
     },
     watchdog => {
 	optional => 1,
@@ -540,6 +564,12 @@ EODESCR
 	description => "Specifies the Qemu machine type of the running vm. This is used internally for snapshots.",
     }),
     machine => get_standard_option('pve-qemu-machine'),
+    arch => {
+	description => "Virtual processor architecture. Defaults to the host.",
+	optional => 1,
+	type => 'string',
+	enum => [qw(x86_64 aarch64)],
+    },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
 	type => 'string', format => 'pve-qm-smbios1',
@@ -641,7 +671,7 @@ my $MAX_VIRTIO_DISKS = 16;
 my $MAX_SATA_DISKS = 6;
 my $MAX_USB_DEVICES = 5;
 my $MAX_NETS = 32;
-my $MAX_UNUSED_DISKS = 8;
+my $MAX_UNUSED_DISKS = 256;
 my $MAX_HOSTPCI_DEVICES = 4;
 my $MAX_SERIAL_PORTS = 4;
 my $MAX_PARALLEL_PORTS = 3;
@@ -1000,6 +1030,14 @@ my %scsiblock_fmt = (
     },
 );
 
+my %ssd_fmt = (
+    ssd => {
+	type => 'boolean',
+	description => "Whether to expose this drive as an SSD, rather than a rotational hard disk.",
+	optional => 1,
+    },
+);
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -1047,6 +1085,7 @@ $drivedesc_base{'iops_wr_length'} = { alias => 'iops_wr_max_length' };
 my $ide_fmt = {
     %drivedesc_base,
     %model_fmt,
+    %ssd_fmt,
 };
 PVE::JSONSchema::register_format("pve-qm-ide", $ide_fmt);
 
@@ -1062,6 +1101,7 @@ my $scsi_fmt = {
     %iothread_fmt,
     %queues_fmt,
     %scsiblock_fmt,
+    %ssd_fmt,
 };
 my $scsidesc = {
     optional => 1,
@@ -1072,6 +1112,7 @@ PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
 
 my $sata_fmt = {
     %drivedesc_base,
+    %ssd_fmt,
 };
 my $satadesc = {
     optional => 1,
@@ -1097,6 +1138,7 @@ my $alldrive_fmt = {
     %model_fmt,
     %queues_fmt,
     %scsiblock_fmt,
+    %ssd_fmt,
 };
 
 my $efidisk_fmt = {
@@ -1160,8 +1202,7 @@ my $usbdesc = {
 };
 PVE::JSONSchema::register_standard_option("pve-qm-usb", $usbdesc);
 
-# NOTE: the match-groups of this regex are used in parse_hostpci
-my $PCIRE = qr/([a-f0-9]{2}:[a-f0-9]{2})(?:\.([a-f0-9]))?/;
+my $PCIRE = qr/[a-f0-9]{2}:[a-f0-9]{2}(?:\.[a-f0-9])?/;
 my $hostpci_fmt = {
     host => {
 	default_key => 1,
@@ -1202,6 +1243,17 @@ EODESCR
 	optional => 1,
 	default => 0,
     },
+    'mdev' => {
+	type => 'string',
+        format_description => 'string',
+	pattern => '[^/\.:]+',
+	optional => 1,
+	description => <<EODESCR
+The type of mediated device to use.
+An instance of this type will be created on startup of the VM and
+will be cleaned up when the VM stops.
+EODESCR
+    }
 };
 PVE::JSONSchema::register_format('pve-qm-hostpci', $hostpci_fmt);
 
@@ -1302,19 +1354,15 @@ for (my $i = 0; $i < $MAX_UNUSED_DISKS; $i++)  {
 my $kvm_api_version = 0;
 
 sub kvm_version {
-
     return $kvm_api_version if $kvm_api_version;
 
-    my $fh = IO::File->new("</dev/kvm") ||
-	return 0;
+    open my $fh, '<', '/dev/kvm'
+	or return undef;
 
-    if (my $v = $fh->ioctl(KVM_GET_API_VERSION(), 0)) {
-	$kvm_api_version = $v;
-    }
+    # 0xae00 => KVM_GET_API_VERSION
+    $kvm_api_version = ioctl($fh, 0xae00, 0);
 
-    $fh->close();
-
-    return  $kvm_api_version;
+    return $kvm_api_version;
 }
 
 my $kvm_user_version;
@@ -1651,24 +1699,37 @@ sub machine_type_is_q35 {
 }
 
 sub print_tabletdevice_full {
-    my ($conf) = @_;
+    my ($conf, $arch) = @_;
 
     my $q35 = machine_type_is_q35($conf);
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
-    my $usbbus = $q35 ? "ehci" : "uhci";
+    my $usbbus;
+    if (machine_type_is_q35($conf) || $arch eq 'aarch64') {
+	$usbbus = 'ehci';
+    } else {
+	$usbbus = 'uhci';
+    }
 
     return "usb-tablet,id=tablet,bus=$usbbus.0,port=1";
 }
 
+sub print_keyboarddevice_full {
+    my ($conf, $arch, $machine) = @_;
+
+    return undef if $arch ne 'aarch64';
+
+    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
+}
+
 sub print_drivedevice_full {
-    my ($storecfg, $conf, $vmid, $drive, $bridges) = @_;
+    my ($storecfg, $conf, $vmid, $drive, $bridges, $arch, $machine_type) = @_;
 
     my $device = '';
     my $maxdev = 0;
 
     if ($drive->{interface} eq 'virtio') {
-	my $pciaddr = print_pci_addr("$drive->{interface}$drive->{index}", $bridges);
+	my $pciaddr = print_pci_addr("$drive->{interface}$drive->{index}", $bridges, $arch, $machine_type);
 	$device = "virtio-blk-pci,drive=drive-$drive->{interface}$drive->{index},id=$drive->{interface}$drive->{index}$pciaddr";
 	$device .= ",iothread=iothread-$drive->{interface}$drive->{index}" if $drive->{iothread};
     } elsif ($drive->{interface} eq 'scsi') {
@@ -1704,21 +1765,33 @@ sub print_drivedevice_full {
 	    $device = "scsi-$devicetype,bus=$controller_prefix$controller.0,channel=0,scsi-id=0,lun=$drive->{index},drive=drive-$drive->{interface}$drive->{index},id=$drive->{interface}$drive->{index}";
 	}
 
-    } elsif ($drive->{interface} eq 'ide'){
-	$maxdev = 2;
+	if ($drive->{ssd} && ($devicetype eq 'block' || $devicetype eq 'hd')) {
+	    $device .= ",rotation_rate=1";
+	}
+
+    } elsif ($drive->{interface} eq 'ide' || $drive->{interface} eq 'sata') {
+	my $maxdev = ($drive->{interface} eq 'sata') ? $MAX_SATA_DISKS : 2;
 	my $controller = int($drive->{index} / $maxdev);
 	my $unit = $drive->{index} % $maxdev;
 	my $devicetype = ($drive->{media} && $drive->{media} eq 'cdrom') ? "cd" : "hd";
 
-	$device = "ide-$devicetype,bus=ide.$controller,unit=$unit,drive=drive-$drive->{interface}$drive->{index},id=$drive->{interface}$drive->{index}";
-	if ($devicetype eq 'hd' && (my $model = $drive->{model})) {
-	    $model = URI::Escape::uri_unescape($model);
-	    $device .= ",model=$model";
+	$device = "ide-$devicetype";
+	if ($drive->{interface} eq 'ide') {
+	    $device .= ",bus=ide.$controller,unit=$unit";
+	} else {
+	    $device .= ",bus=ahci$controller.$unit";
 	}
-    } elsif ($drive->{interface} eq 'sata'){
-	my $controller = int($drive->{index} / $MAX_SATA_DISKS);
-	my $unit = $drive->{index} % $MAX_SATA_DISKS;
-	$device = "ide-drive,bus=ahci$controller.$unit,drive=drive-$drive->{interface}$drive->{index},id=$drive->{interface}$drive->{index}";
+	$device .= ",drive=drive-$drive->{interface}$drive->{index},id=$drive->{interface}$drive->{index}";
+
+	if ($devicetype eq 'hd') {
+	    if (my $model = $drive->{model}) {
+		$model = URI::Escape::uri_unescape($model);
+		$device .= ",model=$model";
+	    }
+	    if ($drive->{ssd}) {
+		$device .= ",rotation_rate=1";
+	    }
+	}
     } elsif ($drive->{interface} eq 'usb') {
 	die "implement me";
 	#  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
@@ -1845,7 +1918,7 @@ sub print_drive_full {
 }
 
 sub print_netdevice_full {
-    my ($vmid, $conf, $net, $netid, $bridges, $use_old_bios_files) = @_;
+    my ($vmid, $conf, $net, $netid, $bridges, $use_old_bios_files, $arch, $machine_type) = @_;
 
     my $bootorder = $conf->{boot} || $confdesc->{boot}->{default};
 
@@ -1854,7 +1927,7 @@ sub print_netdevice_full {
          $device = 'virtio-net-pci';
      };
 
-    my $pciaddr = print_pci_addr("$netid", $bridges);
+    my $pciaddr = print_pci_addr("$netid", $bridges, $arch, $machine_type);
     my $tmpstr = "$device,mac=$net->{macaddr},netdev=$netid$pciaddr,id=$netid";
     if ($net->{queues} && $net->{queues} > 1 && $net->{model} eq 'virtio'){
 	#Consider we have N queues, the number of vectors needed is 2*N + 2 (plus one config interrupt and control vq)
@@ -1883,7 +1956,7 @@ sub print_netdevice_full {
 }
 
 sub print_netdev_full {
-    my ($vmid, $conf, $net, $netid, $hotplug) = @_;
+    my ($vmid, $conf, $arch, $net, $netid, $hotplug) = @_;
 
     my $i = '';
     if ($netid =~ m/^net(\d+)$/) {
@@ -1899,7 +1972,9 @@ sub print_netdev_full {
         if length($ifname) >= 16;
 
     my $vhostparam = '';
-    $vhostparam = ',vhost=on' if $kernel_has_vhost_net && $net->{model} eq 'virtio';
+    if (is_native($arch)) {
+	$vhostparam = ',vhost=on' if $kernel_has_vhost_net && $net->{model} eq 'virtio';
+    }
 
     my $vmname = $conf->{name} || "vm$vmid";
 
@@ -1935,6 +2010,58 @@ sub print_cpu_device {
     my $current_socket = int(($id - 1 - $current_core)/$cores);
 
     return "$cpu-x86_64-cpu,id=cpu$id,socket-id=$current_socket,core-id=$current_core,thread-id=0";
+}
+
+my $vga_map = {
+    'cirrus' => 'cirrus-vga',
+    'std' => 'VGA',
+    'vmware' => 'vmware-svga',
+    'virtio' => 'virtio-vga',
+};
+
+sub print_vga_device {
+    my ($conf, $vga, $arch, $machine, $id, $qxlnum, $bridges) = @_;
+
+    my $type = $vga_map->{$vga->{type}};
+    if ($type eq 'virtio-vga' && $arch eq 'aarch64') {
+	$type = 'virtio-gpu';
+    }
+    my $vgamem_mb = $vga->{memory};
+    if ($qxlnum) {
+	$type = $id ? 'qxl' : 'qxl-vga';
+    }
+    die "no devicetype for $vga->{type}\n" if !$type;
+
+    my $memory = "";
+    if ($vgamem_mb) {
+	if ($vga->{type} eq 'virtio') {
+	    my $bytes = PVE::Tools::convert_size($vgamem_mb, "mb" => "b");
+	    $memory = ",max_hostmem=$bytes";
+	} elsif ($qxlnum) {
+	    # from https://www.spice-space.org/multiple-monitors.html
+	    $memory = ",vgamem_mb=$vga->{memory}";
+	    my $ram = $vgamem_mb * 4;
+	    my $vram = $vgamem_mb * 2;
+	    $memory .= ",ram_size_mb=$ram,vram_size_mb=$vram";
+	} else {
+	    $memory = ",vgamem_mb=$vga->{memory}";
+	}
+    } elsif ($qxlnum && $id) {
+	$memory = ",ram_size=67108864,vram_size=33554432";
+    }
+
+    my $q35 = machine_type_is_q35($conf);
+    my $vgaid = "vga" . ($id // '');
+    my $pciaddr;
+
+    if ($q35 && $vgaid eq 'vga') {
+	# the first display uses pcie.0 bus on q35 machines
+	$pciaddr = print_pcie_addr($vgaid, $bridges, $arch, $machine);
+    } else {
+	$pciaddr = print_pci_addr($vgaid, $bridges, $arch, $machine);
+    }
+
+    return "$type,id=${vgaid}${memory}${pciaddr}";
 }
 
 sub drive_is_cloudinit {
@@ -1984,16 +2111,12 @@ sub parse_hostpci {
     my @idlist = split(/;/, $res->{host});
     delete $res->{host};
     foreach my $id (@idlist) {
-	if ($id =~ /^$PCIRE$/) {
-	    if (defined($2)) {
-		push @{$res->{pciid}}, { id => $1, function => $2 };
-	    } else {
-		my $pcidevices = lspci($1);
-		$res->{pciid} = $pcidevices->{$1};
-	    }
-	} else {
-	    # should have been caught by parse_property_string already
-	    die "failed to parse PCI id: $id\n";
+	if ($id =~ m/\./) { # full id 00:00.1
+	    push @{$res->{pciid}}, {
+		id => $id,
+	    };
+	} else { # partial id 00:00
+	    $res->{pciid} = PVE::SysFSTools::lspci($id);
 	}
     }
     return $res;
@@ -2262,6 +2385,15 @@ sub parse_guest_agent {
     return $res;
 }
 
+sub parse_vga {
+    my ($value) = @_;
+
+    return {} if !$value;
+    my $res = eval { PVE::JSONSchema::parse_property_string($vga_fmt, $value) };
+    warn $@ if $@;
+    return $res;
+}
+
 PVE::JSONSchema::register_format('pve-qm-usb-device', \&verify_usb_device);
 sub verify_usb_device {
     my ($value, $noerr) = @_;
@@ -2326,15 +2458,6 @@ sub check_type {
     } else {
 	die "internal error"
     }
-}
-
-sub check_iommu_support{
-    #fixme : need to check IOMMU support
-    #http://www.linux-kvm.org/page/How_to_assign_devices_with_VT-d_in_KVM
-
-    my $iommu=1;
-    return $iommu;
-
 }
 
 sub touch_config {
@@ -2729,7 +2852,7 @@ sub check_cmdline {
 	my @param = split(/\0/, $line);
 
 	my $cmd = $param[0];
-	return if !$cmd || ($cmd !~ m|kvm$| && $cmd !~ m|qemu-system-x86_64$|);
+	return if !$cmd || ($cmd !~ m|kvm$| && $cmd !~ m@(?:^|/)qemu-system-[^/]+$@);
 
 	for (my $i = 0; $i < scalar (@param); $i++) {
 	    my $p = $param[$i];
@@ -3143,9 +3266,111 @@ sub conf_has_serial {
 sub vga_conf_has_spice {
     my ($vga) = @_;
 
-    return 0 if !$vga || $vga !~ m/^qxl([234])?$/;
+    my $vgaconf = parse_vga($vga);
+    my $vgatype = $vgaconf->{type};
+    return 0 if !$vgatype || $vgatype !~ m/^qxl([234])?$/;
 
     return $1 || 1;
+}
+
+my $host_arch; # FIXME: fix PVE::Tools::get_host_arch
+sub get_host_arch() {
+    $host_arch = (POSIX::uname())[4] if !$host_arch;
+    return $host_arch;
+}
+
+sub is_native($) {
+    my ($arch) = @_;
+    return get_host_arch() eq $arch;
+}
+
+my $default_machines = {
+    x86_64 => 'pc',
+    aarch64 => 'virt',
+};
+
+sub get_basic_machine_info {
+    my ($conf, $forcemachine) = @_;
+
+    my $arch = $conf->{arch} // get_host_arch();
+    my $machine = $forcemachine || $conf->{machine} || $default_machines->{$arch};
+    return ($arch, $machine);
+}
+
+sub get_ovmf_files($) {
+    my ($arch) = @_;
+
+    my $ovmf = $OVMF->{$arch}
+	or die "no OVMF images known for architecture '$arch'\n";
+
+    return @$ovmf;
+}
+
+my $Arch2Qemu = {
+    aarch64 => '/usr/bin/qemu-system-aarch64',
+    x86_64 => '/usr/bin/qemu-system-x86_64',
+};
+sub get_command_for_arch($) {
+    my ($arch) = @_;
+    return '/usr/bin/kvm' if is_native($arch);
+
+    my $cmd = $Arch2Qemu->{$arch}
+	or die "don't know how to emulate architecture '$arch'\n";
+    return $cmd;
+}
+
+sub get_cpu_options {
+    my ($conf, $arch, $kvm, $machine_type, $kvm_off, $kvmver, $winversion, $gpu_passthrough) = @_;
+
+    my $cpuFlags = [];
+    my $ostype = $conf->{ostype};
+
+    my $cpu = $kvm ? "kvm64" : "qemu64";
+    if ($arch eq 'aarch64') {
+	$cpu = 'cortex-a57';
+    }
+    if (my $cputype = $conf->{cpu}) {
+	my $cpuconf = PVE::JSONSchema::parse_property_string($cpu_fmt, $cputype)
+	    or die "Cannot parse cpu description: $cputype\n";
+	$cpu = $cpuconf->{cputype};
+	$kvm_off = 1 if $cpuconf->{hidden};
+
+	if (defined(my $flags = $cpuconf->{flags})) {
+	    push @$cpuFlags, split(";", $flags);
+	}
+    }
+
+    push @$cpuFlags , '+lahf_lm' if $cpu eq 'kvm64' && $arch eq 'x86_64';
+
+    push @$cpuFlags , '-x2apic'
+	if $conf->{ostype} && $conf->{ostype} eq 'solaris';
+
+    push @$cpuFlags, '+sep' if $cpu eq 'kvm64' || $cpu eq 'kvm32';
+
+    push @$cpuFlags, '-rdtscp' if $cpu =~ m/^Opteron/;
+
+    if (qemu_machine_feature_enabled ($machine_type, $kvmver, 2, 3) && $arch eq 'x86_64') {
+
+	push @$cpuFlags , '+kvm_pv_unhalt' if $kvm;
+	push @$cpuFlags , '+kvm_pv_eoi' if $kvm;
+    }
+
+    add_hyperv_enlightenments($cpuFlags, $winversion, $machine_type, $kvmver, $conf->{bios}, $gpu_passthrough) if $kvm;
+
+    push @$cpuFlags, 'enforce' if $cpu ne 'host' && $kvm && $arch eq 'x86_64';
+
+    push @$cpuFlags, 'kvm=off' if $kvm_off;
+
+    if (my $cpu_vendor = $cpu_vendor_list->{$cpu}) {
+	push @$cpuFlags, "vendor=${cpu_vendor}"
+	    if $cpu_vendor ne 'default';
+    } elsif ($arch ne 'aarch64') {
+	die "internal error"; # should not happen
+    }
+
+    $cpu .= "," . join(',', @$cpuFlags) if scalar(@$cpuFlags);
+
+    return ('-cpu', $cpu);
 }
 
 sub config_to_command {
@@ -3155,7 +3380,6 @@ sub config_to_command {
     my $globalFlags = [];
     my $machineFlags = [];
     my $rtcFlags = [];
-    my $cpuFlags = [];
     my $devices = [];
     my $pciaddr = '';
     my $bridges = {};
@@ -3163,9 +3387,15 @@ sub config_to_command {
     my $vernum = 0; # unknown
     my $ostype = $conf->{ostype};
     my $winversion = windows_version($ostype);
-    my $kvm = $conf->{kvm} // 1;
+    my $kvm = $conf->{kvm};
 
-    die "KVM virtualisation configured, but not available. Either disable in VM configuration or enable in BIOS.\n" if (!$cpuinfo->{hvm} && $kvm);
+    my ($arch, $machine_type) = get_basic_machine_info($conf, $forcemachine);
+    $kvm //= 1 if is_native($arch);
+
+    if ($kvm) {
+	die "KVM virtualisation configured, but not available. Either disable in VM configuration or enable in BIOS.\n"
+	    if !defined kvm_version();
+    }
 
     if ($kvmver =~ m/^(\d+)\.(\d+)$/) {
 	$vernum = $1*1000000+$2*1000;
@@ -3179,14 +3409,13 @@ sub config_to_command {
 
     my $q35 = machine_type_is_q35($conf);
     my $hotplug_features = parse_hotplug_features(defined($conf->{hotplug}) ? $conf->{hotplug} : '1');
-    my $machine_type = $forcemachine || $conf->{machine};
     my $use_old_bios_files = undef;
     ($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
 
     my $cpuunits = defined($conf->{cpuunits}) ?
             $conf->{cpuunits} : $defaults->{cpuunits};
 
-    push @$cmd, '/usr/bin/kvm';
+    push @$cmd, get_command_for_arch($arch);
 
     push @$cmd, '-id', $vmid;
 
@@ -3201,8 +3430,7 @@ sub config_to_command {
     push @$cmd, '-mon', "chardev=qmp,mode=control";
 
     if (qemu_machine_feature_enabled($machine_type, $kvmver, 2, 12)) {
-	my $eventsocket = qmp_socket($vmid, 0, 'event');
-	push @$cmd, '-chardev', "socket,id=qmp-event,path=$eventsocket,server,nowait";
+	push @$cmd, '-chardev', "socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect=5";
 	push @$cmd, '-mon', "chardev=qmp-event,mode=control";
     }
 
@@ -3218,8 +3446,9 @@ sub config_to_command {
 	push @$devices, '-device', 'vmgenid,guid='.$conf->{vmgenid};
     }
 
+    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch);
     if ($conf->{bios} && $conf->{bios} eq 'ovmf') {
-	die "uefi base image not found\n" if ! -f $OVMF_CODE;
+	die "uefi base image not found\n" if ! -f $ovmf_code;
 
 	my $path;
 	my $format;
@@ -3241,28 +3470,30 @@ sub config_to_command {
 	} else {
 	    warn "no efidisk configured! Using temporary efivars disk.\n";
 	    $path = "/tmp/$vmid-ovmf.fd";
-	    PVE::Tools::file_copy($OVMF_VARS, $path, -s $OVMF_VARS);
+	    PVE::Tools::file_copy($ovmf_vars, $path, -s $ovmf_vars);
 	    $format = 'raw';
 	}
 
-	push @$cmd, '-drive', "if=pflash,unit=0,format=raw,readonly,file=$OVMF_CODE";
+	push @$cmd, '-drive', "if=pflash,unit=0,format=raw,readonly,file=$ovmf_code";
 	push @$cmd, '-drive', "if=pflash,unit=1,format=$format,id=drive-efidisk0,file=$path";
     }
 
 
     # add usb controllers
-    my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers($conf, $bridges, $q35, $usbdesc->{format}, $MAX_USB_DEVICES);
+    my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers($conf, $bridges, $arch, $machine_type, $usbdesc->{format}, $MAX_USB_DEVICES);
     push @$devices, @usbcontrollers if @usbcontrollers;
-    my $vga = $conf->{vga};
+    my $vga = parse_vga($conf->{vga});
 
-    my $qxlnum = vga_conf_has_spice($vga);
-    $vga = 'qxl' if $qxlnum;
+    my $qxlnum = vga_conf_has_spice($conf->{vga});
+    $vga->{type} = 'qxl' if $qxlnum;
 
-    if (!$vga) {
-	if (qemu_machine_feature_enabled($machine_type, $kvmver, 2, 9)) {
-	    $vga = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
+    if (!$vga->{type}) {
+	if ($arch eq 'aarch64') {
+	    $vga->{type} = 'virtio';
+	} elsif (qemu_machine_feature_enabled($machine_type, $kvmver, 2, 9)) {
+	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
 	} else {
-	    $vga = ($winversion >= 6) ? 'std' : 'cirrus';
+	    $vga->{type} = ($winversion >= 6) ? 'std' : 'cirrus';
 	}
     }
 
@@ -3273,10 +3504,14 @@ sub config_to_command {
     } else {
 	$tablet = $defaults->{tablet};
 	$tablet = 0 if $qxlnum; # disable for spice because it is not needed
-	$tablet = 0 if $vga =~ m/^serial\d+$/; # disable if we use serial terminal (no vga card)
+	$tablet = 0 if $vga->{type} =~ m/^serial\d+$/; # disable if we use serial terminal (no vga card)
     }
 
-    push @$devices, '-device', print_tabletdevice_full($conf) if $tablet;
+    if ($tablet) {
+	push @$devices, '-device', print_tabletdevice_full($conf, $arch) if $tablet;
+	my $kbd = print_keyboarddevice_full($conf, $arch);
+	push @$devices, '-device', $kbd if defined($kbd);
+    }
 
     my $kvm_off = 0;
     my $gpu_passthrough;
@@ -3291,7 +3526,7 @@ sub config_to_command {
 	    die "q35 machine model is not enabled" if !$q35;
 	    $pciaddr = print_pcie_addr("hostpci$i");
 	}else{
-	    $pciaddr = print_pci_addr("hostpci$i", $bridges);
+	    $pciaddr = print_pci_addr("hostpci$i", $bridges, $arch, $machine_type);
 	}
 
 	my $rombar = defined($d->{rombar}) && !$d->{rombar} ? ',rombar=0' : '';
@@ -3301,7 +3536,7 @@ sub config_to_command {
 	if ($d->{'x-vga'}) {
 	    $xvga = ',x-vga=on';
 	    $kvm_off = 1;
-	    $vga = 'none';
+	    $vga->{type} = 'none';
 	    $gpu_passthrough = 1;
 
 	    if ($conf->{bios} && $conf->{bios} eq 'ovmf') {
@@ -3310,6 +3545,14 @@ sub config_to_command {
 	}
 	my $pcidevices = $d->{pciid};
 	my $multifunction = 1 if @$pcidevices > 1;
+	my $sysfspath;
+	if ($d->{mdev} && scalar(@$pcidevices) == 1) {
+	    my $id = $pcidevices->[0]->{id};
+	    my $uuid = PVE::SysFSTools::generate_mdev_uuid($vmid, $i);
+	    $sysfspath = "/sys/bus/pci/devices/0000:$id/$uuid";
+	} elsif ($d->{mdev}) {
+	    warn "ignoring mediated device with multifunction device\n";
+	}
 
 	my $j=0;
         foreach my $pcidevice (@$pcidevices) {
@@ -3318,7 +3561,13 @@ sub config_to_command {
 	    $id .= ".$j" if $multifunction;
 	    my $addr = $pciaddr;
 	    $addr .= ".$j" if $multifunction;
-	    my $devicestr = "vfio-pci,host=$pcidevice->{id}.$pcidevice->{function},id=$id$addr";
+	    my $devicestr = "vfio-pci";
+	    if ($sysfspath) {
+		$devicestr .= ",sysfsdev=$sysfspath";
+	    } else {
+		$devicestr .= ",host=$pcidevice->{id}";
+	    }
+	    $devicestr .= ",id=$id$addr";
 
 	    if($j == 0){
 		$devicestr .= "$rombar$xvga";
@@ -3340,7 +3589,14 @@ sub config_to_command {
 	    if ($path eq 'socket') {
 		my $socket = "/var/run/qemu-server/${vmid}.serial$i";
 		push @$devices, '-chardev', "socket,id=serial$i,path=$socket,server,nowait";
-		push @$devices, '-device', "isa-serial,chardev=serial$i";
+		# On aarch64, serial0 is the UART device. Qemu only allows
+		# connecting UART devices via the '-serial' command line, as
+		# the device has a fixed slot on the hardware...
+		if ($arch eq 'aarch64' && $i == 0) {
+		    push @$devices, '-serial', "chardev:serial$i";
+		} else {
+		    push @$devices, '-device', "isa-serial,chardev=serial$i";
+		}
 	    } else {
 		die "no such serial device\n" if ! -c $path;
 		push @$devices, '-chardev', "tty,id=serial$i,path=$path";
@@ -3404,12 +3660,12 @@ sub config_to_command {
 
     push @$cmd, '-no-reboot' if  defined($conf->{reboot}) && $conf->{reboot} == 0;
 
-    push @$cmd, '-vga', $vga if $vga && $vga !~ m/^serial\d+$/; # for kvm 77 and later
-
-    if ($vga && $vga !~ m/^serial\d+$/ && $vga ne 'none'){
+    if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
+	push @$devices, '-device', print_vga_device($conf, $vga, $arch, $machine_type, undef, $qxlnum, $bridges);
 	my $socket = vnc_socket($vmid);
 	push @$cmd,  '-vnc', "unix:$socket,x509,password";
     } else {
+	push @$cmd, '-vga', 'none' if $vga->{type} eq 'none';
 	push @$cmd, '-nographic';
     }
 
@@ -3448,48 +3704,7 @@ sub config_to_command {
 	push @$rtcFlags, 'base=localtime';
     }
 
-    my $cpu = $kvm ? "kvm64" : "qemu64";
-    if (my $cputype = $conf->{cpu}) {
-	my $cpuconf = PVE::JSONSchema::parse_property_string($cpu_fmt, $cputype)
-	    or die "Cannot parse cpu description: $cputype\n";
-	$cpu = $cpuconf->{cputype};
-	$kvm_off = 1 if $cpuconf->{hidden};
-
-	if (defined(my $flags = $cpuconf->{flags})) {
-	    push @$cpuFlags, split(";", $flags);
-	}
-    }
-
-    push @$cpuFlags , '+lahf_lm' if $cpu eq 'kvm64';
-
-    push @$cpuFlags , '-x2apic'
-	if $conf->{ostype} && $conf->{ostype} eq 'solaris';
-
-    push @$cpuFlags, '+sep' if $cpu eq 'kvm64' || $cpu eq 'kvm32';
-
-    push @$cpuFlags, '-rdtscp' if $cpu =~ m/^Opteron/;
-
-    if (qemu_machine_feature_enabled ($machine_type, $kvmver, 2, 3)) {
-
-	push @$cpuFlags , '+kvm_pv_unhalt' if $kvm;
-	push @$cpuFlags , '+kvm_pv_eoi' if $kvm;
-    }
-
-    add_hyperv_enlightenments($cpuFlags, $winversion, $machine_type, $kvmver, $conf->{bios}, $gpu_passthrough) if $kvm;
-
-    push @$cpuFlags, 'enforce' if $cpu ne 'host' && $kvm;
-
-    push @$cpuFlags, 'kvm=off' if $kvm_off;
-
-    my $cpu_vendor = $cpu_vendor_list->{$cpu} ||
-	die "internal error"; # should not happen
-
-    push @$cpuFlags, "vendor=${cpu_vendor}"
-	if $cpu_vendor ne 'default';
-
-    $cpu .= "," . join(',', @$cpuFlags) if scalar(@$cpuFlags);
-
-    push @$cmd, '-cpu', $cpu;
+    push @$cmd, get_cpu_options($conf, $arch, $kvm, $machine_type, $kvm_off, $kvmver, $winversion, $gpu_passthrough);
 
     PVE::QemuServer::Memory::config($conf, $vmid, $sockets, $cores, $defaults, $hotplug_features, $cmd);
     
@@ -3504,7 +3719,7 @@ sub config_to_command {
 
     if (parse_guest_agent($conf)->{enabled}) {
 	my $qgasocket = qmp_socket($vmid, 1);
-	my $pciaddr = print_pci_addr("qga0", $bridges);
+	my $pciaddr = print_pci_addr("qga0", $bridges, $arch, $machine_type);
 	push @$devices, '-chardev', "socket,path=$qgasocket,server,nowait,id=qga0";
 	push @$devices, '-device', "virtio-serial,id=qga0$pciaddr";
 	push @$devices, '-device', 'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0';
@@ -3516,17 +3731,21 @@ sub config_to_command {
 	if ($qxlnum > 1) {
 	    if ($winversion){
 		for(my $i = 1; $i < $qxlnum; $i++){
-		    my $pciaddr = print_pci_addr("vga$i", $bridges);
-		    push @$devices, '-device', "qxl,id=vga$i,ram_size=67108864,vram_size=33554432$pciaddr";
+		    push @$devices, '-device', print_vga_device($conf, $vga, $arch, $machine_type, $i, $qxlnum, $bridges);
 		}
 	    } else {
 		# assume other OS works like Linux
-		push @$cmd, '-global', 'qxl-vga.ram_size=134217728';
-		push @$cmd, '-global', 'qxl-vga.vram_size=67108864';
+		my ($ram, $vram) = ("134217728", "67108864");
+		if ($vga->{memory}) {
+		    $ram = PVE::Tools::convert_size($qxlnum*4*$vga->{memory}, 'mb' => 'b');
+		    $vram = PVE::Tools::convert_size($qxlnum*2*$vga->{memory}, 'mb' => 'b');
+		}
+		push @$cmd, '-global', "qxl-vga.ram_size=$ram";
+		push @$cmd, '-global', "qxl-vga.vram_size=$vram";
 	    }
 	}
 
-	my $pciaddr = print_pci_addr("spice", $bridges);
+	my $pciaddr = print_pci_addr("spice", $bridges, $arch, $machine_type);
 
 	my $nodename = PVE::INotify::nodename();
 	my $pfamily = PVE::Tools::get_host_address_family($nodename);
@@ -3544,13 +3763,13 @@ sub config_to_command {
 
     # enable balloon by default, unless explicitly disabled
     if (!defined($conf->{balloon}) || $conf->{balloon}) {
-	$pciaddr = print_pci_addr("balloon0", $bridges);
+	$pciaddr = print_pci_addr("balloon0", $bridges, $arch, $machine_type);
 	push @$devices, '-device', "virtio-balloon-pci,id=balloon0$pciaddr";
     }
 
     if ($conf->{watchdog}) {
 	my $wdopts = parse_watchdog($conf->{watchdog});
-	$pciaddr = print_pci_addr("watchdog", $bridges);
+	$pciaddr = print_pci_addr("watchdog", $bridges, $arch, $machine_type);
 	my $watchdog = $wdopts->{model} || 'i6300esb';
 	push @$devices, '-device', "$watchdog$pciaddr";
 	push @$devices, '-watchdog-action', $wdopts->{action} if $wdopts->{action};
@@ -3598,7 +3817,7 @@ sub config_to_command {
 
 	    my ($maxdev, $controller, $controller_prefix) = scsihw_infos($conf, $drive);
 
-	    $pciaddr = print_pci_addr("$controller_prefix$controller", $bridges);
+	    $pciaddr = print_pci_addr("$controller_prefix$controller", $bridges, $arch, $machine_type);
 	    my $scsihw_type = $scsihw =~ m/^virtio-scsi-single/ ? "virtio-scsi-pci" : $scsihw;
 
 	    my $iothread = '';
@@ -3620,14 +3839,14 @@ sub config_to_command {
 
         if ($drive->{interface} eq 'sata') {
            my $controller = int($drive->{index} / $MAX_SATA_DISKS);
-           $pciaddr = print_pci_addr("ahci$controller", $bridges);
+           $pciaddr = print_pci_addr("ahci$controller", $bridges, $arch, $machine_type);
            push @$devices, '-device', "ahci,id=ahci$controller,multifunction=on$pciaddr" if !$ahcicontroller->{$controller};
            $ahcicontroller->{$controller}=1;
         }
 
 	my $drive_cmd = print_drive_full($storecfg, $vmid, $drive);
 	push @$devices, '-drive',$drive_cmd;
-	push @$devices, '-device', print_drivedevice_full($storecfg, $conf, $vmid, $drive, $bridges);
+	push @$devices, '-device', print_drivedevice_full($storecfg, $conf, $vmid, $drive, $bridges, $arch, $machine_type);
     });
 
     for (my $i = 0; $i < $MAX_NETS; $i++) {
@@ -3642,10 +3861,10 @@ sub config_to_command {
             $bootindex_hash->{n} += 1;
          }
 
-         my $netdevfull = print_netdev_full($vmid,$conf,$d,"net$i");
+         my $netdevfull = print_netdev_full($vmid, $conf, $arch, $d, "net$i");
          push @$devices, '-netdev', $netdevfull;
 
-         my $netdevicefull = print_netdevice_full($vmid, $conf, $d, "net$i", $bridges, $use_old_bios_files);
+         my $netdevicefull = print_netdevice_full($vmid, $conf, $d, "net$i", $bridges, $use_old_bios_files, $arch, $machine_type);
          push @$devices, '-device', $netdevicefull;
     }
 
@@ -3659,7 +3878,7 @@ sub config_to_command {
 	$bridges->{3} = 1 if $scsihw =~ m/^virtio-scsi-single/;
 
 	while (my ($k, $v) = each %$bridges) {
-	    $pciaddr = print_pci_addr("pci.$k");
+	    $pciaddr = print_pci_addr("pci.$k", undef, $arch, $machine_type);
 	    unshift @$devices, '-device', "pci-bridge,id=pci.$k,chassis_nr=$k$pciaddr" if $k > 0;
 	}
     }
@@ -3757,18 +3976,22 @@ sub vm_devices_list {
 }
 
 sub vm_deviceplug {
-    my ($storecfg, $conf, $vmid, $deviceid, $device) = @_;
+    my ($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type) = @_;
 
     my $q35 = machine_type_is_q35($conf);
 
     my $devices_list = vm_devices_list($vmid);
     return 1 if defined($devices_list->{$deviceid});
 
-    qemu_add_pci_bridge($storecfg, $conf, $vmid, $deviceid); # add PCI bridge if we need it for the device
+    qemu_add_pci_bridge($storecfg, $conf, $vmid, $deviceid, $arch, $machine_type); # add PCI bridge if we need it for the device
 
     if ($deviceid eq 'tablet') {
 
-	qemu_deviceadd($vmid, print_tabletdevice_full($conf));
+	qemu_deviceadd($vmid, print_tabletdevice_full($conf, $arch));
+
+    } elsif ($deviceid eq 'keyboard') {
+
+	qemu_deviceadd($vmid, print_keyboarddevice_full($conf, $arch));
 
     } elsif ($deviceid =~ m/^usb(\d+)$/) {
 
@@ -3783,7 +4006,7 @@ sub vm_deviceplug {
 	qemu_iothread_add($vmid, $deviceid, $device);
 
         qemu_driveadd($storecfg, $vmid, $device);
-        my $devicefull = print_drivedevice_full($storecfg, $conf, $vmid, $device);
+        my $devicefull = print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
 
         qemu_deviceadd($vmid, $devicefull);
 	eval { qemu_deviceaddverify($vmid, $deviceid); };
@@ -3797,7 +4020,7 @@ sub vm_deviceplug {
 
 
         my $scsihw = defined($conf->{scsihw}) ? $conf->{scsihw} : "lsi";
-        my $pciaddr = print_pci_addr($deviceid);
+        my $pciaddr = print_pci_addr($deviceid, undef, $arch, $machine_type);
 	my $scsihw_type = $scsihw eq 'virtio-scsi-single' ? "virtio-scsi-pci" : $scsihw;
 
         my $devicefull = "$scsihw_type,id=$deviceid$pciaddr";
@@ -3816,10 +4039,10 @@ sub vm_deviceplug {
 
     } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
 
-        qemu_findorcreatescsihw($storecfg,$conf, $vmid, $device);
+        qemu_findorcreatescsihw($storecfg,$conf, $vmid, $device, $arch, $machine_type);
         qemu_driveadd($storecfg, $vmid, $device);
 
-	my $devicefull = print_drivedevice_full($storecfg, $conf, $vmid, $device);
+	my $devicefull = print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
 	eval { qemu_deviceadd($vmid, $devicefull); };
 	if (my $err = $@) {
 	    eval { qemu_drivedel($vmid, $deviceid); };
@@ -3829,13 +4052,13 @@ sub vm_deviceplug {
 
     } elsif ($deviceid =~ m/^(net)(\d+)$/) {
 
-        return undef if !qemu_netdevadd($vmid, $conf, $device, $deviceid);
+        return undef if !qemu_netdevadd($vmid, $conf, $arch, $device, $deviceid);
 
         my $machine_type = PVE::QemuServer::qemu_machine_pxe($vmid, $conf); 
         my $use_old_bios_files = undef;
         ($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
 
-        my $netdevicefull = print_netdevice_full($vmid, $conf, $device, $deviceid, undef, $use_old_bios_files);
+        my $netdevicefull = print_netdevice_full($vmid, $conf, $device, $deviceid, undef, $use_old_bios_files, $arch, $machine_type);
         qemu_deviceadd($vmid, $netdevicefull);
         eval { qemu_deviceaddverify($vmid, $deviceid); };
 	if (my $err = $@) {
@@ -3847,7 +4070,7 @@ sub vm_deviceplug {
     } elsif (!$q35 && $deviceid =~ m/^(pci\.)(\d+)$/) {
 
 	my $bridgeid = $2;
-	my $pciaddr = print_pci_addr($deviceid);
+	my $pciaddr = print_pci_addr($deviceid, undef, $arch, $machine_type);
 	my $devicefull = "pci-bridge,id=pci.$bridgeid,chassis_nr=$bridgeid$pciaddr";
 
 	qemu_deviceadd($vmid, $devicefull);
@@ -3869,7 +4092,7 @@ sub vm_deviceunplug {
 
     die "can't unplug bootdisk" if $conf->{bootdisk} && $conf->{bootdisk} eq $deviceid;
 
-    if ($deviceid eq 'tablet') {
+    if ($deviceid eq 'tablet' || $deviceid eq 'keyboard') {
 
 	qemu_devicedel($vmid, $deviceid);
 
@@ -4020,7 +4243,7 @@ sub qemu_devicedelverify {
 }
 
 sub qemu_findorcreatescsihw {
-    my ($storecfg, $conf, $vmid, $device) = @_;
+    my ($storecfg, $conf, $vmid, $device, $arch, $machine_type) = @_;
 
     my ($maxdev, $controller, $controller_prefix) = scsihw_infos($conf, $device);
 
@@ -4028,7 +4251,7 @@ sub qemu_findorcreatescsihw {
     my $devices_list = vm_devices_list($vmid);
 
     if(!defined($devices_list->{$scsihwid})) {
-	vm_deviceplug($storecfg, $conf, $vmid, $scsihwid, $device);
+	vm_deviceplug($storecfg, $conf, $vmid, $scsihwid, $device, $arch, $machine_type);
     }
 
     return 1;
@@ -4064,13 +4287,13 @@ sub qemu_deletescsihw {
 }
 
 sub qemu_add_pci_bridge {
-    my ($storecfg, $conf, $vmid, $device) = @_;
+    my ($storecfg, $conf, $vmid, $device, $arch, $machine_type) = @_;
 
     my $bridges = {};
 
     my $bridgeid;
 
-    print_pci_addr($device, $bridges);
+    print_pci_addr($device, $bridges, $arch, $machine_type);
 
     while (my ($k, $v) = each %$bridges) {
 	$bridgeid = $k;
@@ -4081,7 +4304,7 @@ sub qemu_add_pci_bridge {
     my $devices_list = vm_devices_list($vmid);
 
     if (!defined($devices_list->{$bridge})) {
-	vm_deviceplug($storecfg, $conf, $vmid, $bridge);
+	vm_deviceplug($storecfg, $conf, $vmid, $bridge, $arch, $machine_type);
     }
 
     return 1;
@@ -4095,9 +4318,9 @@ sub qemu_set_link_status {
 }
 
 sub qemu_netdevadd {
-    my ($vmid, $conf, $device, $deviceid) = @_;
+    my ($vmid, $conf, $arch, $device, $deviceid) = @_;
 
-    my $netdev = print_netdev_full($vmid, $conf, $device, $deviceid, 1);
+    my $netdev = print_netdev_full($vmid, $conf, $arch, $device, $deviceid, 1);
     my %options =  split(/[=,]/, $netdev);
 
     vm_mon_cmd($vmid, "netdev_add",  %options);
@@ -4111,7 +4334,7 @@ sub qemu_netdevdel {
 }
 
 sub qemu_usb_hotplug {
-    my ($storecfg, $conf, $vmid, $deviceid, $device) = @_;
+    my ($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type) = @_;
 
     return if !$device;
 
@@ -4124,7 +4347,7 @@ sub qemu_usb_hotplug {
 	my $devicelist = vm_devices_list($vmid);
 
 	if (!$devicelist->{xhci}) {
-	    my $pciaddr = print_pci_addr("xhci");
+	    my $pciaddr = print_pci_addr("xhci", undef, $arch, $machine_type);
 	    qemu_deviceadd($vmid, "nec-usb-xhci,id=xhci$pciaddr");
 	}
     }
@@ -4132,7 +4355,7 @@ sub qemu_usb_hotplug {
     $d->{usb3} = $device->{usb3};
 
     # add the new one
-    vm_deviceplug($storecfg, $conf, $vmid, $deviceid, $d);
+    vm_deviceplug($storecfg, $conf, $vmid, $deviceid, $d, $arch, $machine_type);
 }
 
 sub qemu_cpu_hotplug {
@@ -4366,6 +4589,7 @@ sub vmconfig_hotplug_pending {
     my ($vmid, $conf, $storecfg, $selection, $errors) = @_;
 
     my $defaults = load_defaults();
+    my ($arch, $machine_type) = get_basic_machine_info($conf, undef);
 
     # commit values which do not have any impact on running VM first
     # Note: those option cannot raise errors, we we do not care about
@@ -4401,9 +4625,12 @@ sub vmconfig_hotplug_pending {
 	    } elsif ($opt eq 'tablet') {
 		die "skip\n" if !$hotplug_features->{usb};
 		if ($defaults->{tablet}) {
-		    vm_deviceplug($storecfg, $conf, $vmid, $opt);
+		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
+		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
+			if $arch eq 'aarch64';
 		} else {
-		    vm_deviceunplug($vmid, $conf, $opt);
+		    vm_deviceunplug($vmid, $conf, 'tablet');
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
 		}
 	    } elsif ($opt =~ m/^usb\d+/) {
 		die "skip\n";
@@ -4476,9 +4703,12 @@ sub vmconfig_hotplug_pending {
 	    } elsif ($opt eq 'tablet') {
 		die "skip\n" if !$hotplug_features->{usb};
 		if ($value == 1) {
-		    vm_deviceplug($storecfg, $conf, $vmid, $opt);
+		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
+		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
+			if $arch eq 'aarch64';
 		} elsif ($value == 0) {
-		    vm_deviceunplug($vmid, $conf, $opt);
+		    vm_deviceunplug($vmid, $conf, 'tablet');
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
 		}
 	    } elsif ($opt =~ m/^usb\d+$/) {
 		die "skip\n";
@@ -4487,7 +4717,7 @@ sub vmconfig_hotplug_pending {
 		die "skip\n" if !$hotplug_features->{usb} || $value =~ m/spice/i;
 		my $d = eval { PVE::JSONSchema::parse_property_string($usbdesc->{format}, $value) };
 		die "skip\n" if !$d;
-		qemu_usb_hotplug($storecfg, $conf, $vmid, $opt, $d);
+		qemu_usb_hotplug($storecfg, $conf, $vmid, $opt, $d, $arch, $machine_type);
 	    } elsif ($opt eq 'vcpus') {
 		die "skip\n" if !$hotplug_features->{cpu};
 		qemu_cpu_hotplug($vmid, $conf, $value);
@@ -4505,7 +4735,7 @@ sub vmconfig_hotplug_pending {
 	    } elsif ($opt =~ m/^net(\d+)$/) {
 		# some changes can be done without hotplug
 		vmconfig_update_net($storecfg, $conf, $hotplug_features->{network},
-				    $vmid, $opt, $value);
+				    $vmid, $opt, $value, $arch, $machine_type);
 	    } elsif (is_valid_drivename($opt)) {
 		# some changes can be done without hotplug
 		my $drive = parse_drive($opt, $value);
@@ -4513,7 +4743,7 @@ sub vmconfig_hotplug_pending {
 		    &$apply_pending_cloudinit($opt, $value);
 		}
 		vmconfig_update_disk($storecfg, $conf, $hotplug_features->{disk},
-				     $vmid, $opt, $value, 1);
+				     $vmid, $opt, $value, 1, $arch, $machine_type);
 	    } elsif ($opt =~ m/^memory$/) { #dimms
 		die "skip\n" if !$hotplug_features->{memory};
 		$value = PVE::QemuServer::Memory::qemu_memory_hotplug($vmid, $conf, $defaults, $opt, $value);
@@ -4642,7 +4872,7 @@ my $safe_string_ne = sub {
 };
 
 sub vmconfig_update_net {
-    my ($storecfg, $conf, $hotplug, $vmid, $opt, $value) = @_;
+    my ($storecfg, $conf, $hotplug, $vmid, $opt, $value, $arch, $machine_type) = @_;
 
     my $newnet = parse_net($value);
 
@@ -4683,14 +4913,14 @@ sub vmconfig_update_net {
     }
 
     if ($hotplug) {
-	vm_deviceplug($storecfg, $conf, $vmid, $opt, $newnet);
+	vm_deviceplug($storecfg, $conf, $vmid, $opt, $newnet, $arch, $machine_type);
     } else {
 	die "skip\n";
     }
 }
 
 sub vmconfig_update_disk {
-    my ($storecfg, $conf, $hotplug, $vmid, $opt, $value, $force) = @_;
+    my ($storecfg, $conf, $hotplug, $vmid, $opt, $value, $force, $arch, $machine_type) = @_;
 
     # fixme: do we need force?
 
@@ -4791,7 +5021,7 @@ sub vmconfig_update_disk {
     die "skip\n" if !$hotplug || $opt =~ m/(ide|sata)(\d+)/;
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
-    vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive);
+    vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
 }
 
 sub vm_start {
@@ -4927,13 +5157,21 @@ sub vm_start {
           next if !$d;
 	  my $pcidevices = $d->{pciid};
 	  foreach my $pcidevice (@$pcidevices) {
-		my $pciid = $pcidevice->{id}.".".$pcidevice->{function};
+		my $pciid = $pcidevice->{id};
 
-		my $info = pci_device_info("0000:$pciid");
-		die "IOMMU not present\n" if !check_iommu_support();
+		my $info = PVE::SysFSTools::pci_device_info("0000:$pciid");
+		die "IOMMU not present\n" if !PVE::SysFSTools::check_iommu_support();
 		die "no pci device info for device '$pciid'\n" if !$info;
-		die "can't unbind/bind pci group to vfio '$pciid'\n" if !pci_dev_group_bind_to_vfio($pciid);
-		die "can't reset pci device '$pciid'\n" if $info->{has_fl_reset} and !pci_dev_reset($info);
+
+		if ($d->{mdev}) {
+		    my $uuid = PVE::SysFSTools::generate_mdev_uuid($vmid, $i);
+		    PVE::SysFSTools::pci_create_mdev_device($pciid, $uuid, $d->{mdev});
+		} else {
+		    die "can't unbind/bind pci group to vfio '$pciid'\n"
+			if !PVE::SysFSTools::pci_dev_group_bind_to_vfio($pciid);
+		    die "can't reset pci device '$pciid'\n"
+			if $info->{has_fl_reset} and !PVE::SysFSTools::pci_dev_reset($info);
+		}
 	  }
         }
 
@@ -5173,6 +5411,18 @@ sub vm_stop_cleanup {
 	    unlink "/var/run/qemu-server/${vmid}.$ext";
 	}
 
+	foreach my $key (keys %$conf) {
+	    next if $key !~ m/^hostpci(\d+)$/;
+	    my $hostpciindex = $1;
+	    my $d = parse_hostpci($conf->{$key});
+	    my $uuid = PVE::SysFSTools::generate_mdev_uuid($vmid, $hostpciindex);
+
+	    foreach my $pci (@{$d->{pciid}}) {
+		my $pciid = $pci->{id};
+		PVE::SysFSTools::pci_cleanup_mdev_device($pciid, $uuid);
+	    }
+	}
+
 	vmconfig_apply_pending($vmid, $conf, $storecfg) if $apply_pending_changes;
     };
     warn $@ if $@; # avoid errors - just warn
@@ -5338,123 +5588,6 @@ sub vm_destroy {
     });
 }
 
-# pci helpers
-
-sub file_write {
-    my ($filename, $buf) = @_;
-
-    my $fh = IO::File->new($filename, "w");
-    return undef if !$fh;
-
-    my $res = print $fh $buf;
-
-    $fh->close();
-
-    return $res;
-}
-
-sub pci_device_info {
-    my ($name) = @_;
-
-    my $res;
-
-    return undef if $name !~ m/^([a-f0-9]{4}):([a-f0-9]{2}):([a-f0-9]{2})\.([a-f0-9])$/;
-    my ($domain, $bus, $slot, $func) = ($1, $2, $3, $4);
-
-    my $irq = file_read_firstline("$pcisysfs/devices/$name/irq");
-    return undef if !defined($irq) || $irq !~ m/^\d+$/;
-
-    my $vendor = file_read_firstline("$pcisysfs/devices/$name/vendor");
-    return undef if !defined($vendor) || $vendor !~ s/^0x//;
-
-    my $product = file_read_firstline("$pcisysfs/devices/$name/device");
-    return undef if !defined($product) || $product !~ s/^0x//;
-
-    $res = {
-	name => $name,
-	vendor => $vendor,
-	product => $product,
-	domain => $domain,
-	bus => $bus,
-	slot => $slot,
-	func => $func,
-	irq => $irq,
-	has_fl_reset => -f "$pcisysfs/devices/$name/reset" || 0,
-    };
-
-    return $res;
-}
-
-sub pci_dev_reset {
-    my ($dev) = @_;
-
-    my $name = $dev->{name};
-
-    my $fn = "$pcisysfs/devices/$name/reset";
-
-    return file_write($fn, "1");
-}
-
-sub pci_dev_bind_to_vfio {
-    my ($dev) = @_;
-
-    my $name = $dev->{name};
-
-    my $vfio_basedir = "$pcisysfs/drivers/vfio-pci";
-
-    if (!-d $vfio_basedir) {
-	system("/sbin/modprobe vfio-pci >/dev/null 2>/dev/null");
-    }
-    die "Cannot find vfio-pci module!\n" if !-d $vfio_basedir;
-
-    my $testdir = "$vfio_basedir/$name";
-    return 1 if -d $testdir;
-
-    my $data = "$dev->{vendor} $dev->{product}";
-    return undef if !file_write("$vfio_basedir/new_id", $data);
-
-    my $fn = "$pcisysfs/devices/$name/driver/unbind";
-    if (!file_write($fn, $name)) {
-	return undef if -f $fn;
-    }
-
-    $fn = "$vfio_basedir/bind";
-    if (! -d $testdir) {
-	return undef if !file_write($fn, $name);
-    }
-
-    return -d $testdir;
-}
-
-sub pci_dev_group_bind_to_vfio {
-    my ($pciid) = @_;
-
-    my $vfio_basedir = "$pcisysfs/drivers/vfio-pci";
-
-    if (!-d $vfio_basedir) {
-	system("/sbin/modprobe vfio-pci >/dev/null 2>/dev/null");
-    }
-    die "Cannot find vfio-pci module!\n" if !-d $vfio_basedir;
-
-    # get IOMMU group devices
-    opendir(my $D, "$pcisysfs/devices/0000:$pciid/iommu_group/devices/") || die "Cannot open iommu_group: $!\n";
-      my @devs = grep /^0000:/, readdir($D);
-    closedir($D);
-
-    foreach my $pciid (@devs) {
-	$pciid =~ m/^([:\.\da-f]+)$/ or die "PCI ID $pciid not valid!\n";
-
-        # pci bridges, switches or root ports are not supported
-        # they have a pci_bus subdirectory so skip them
-        next if (-e "$pcisysfs/devices/$pciid/pci_bus");
-
-	my $info = pci_device_info($1);
-	pci_dev_bind_to_vfio($info) || die "Cannot bind $pciid to vfio\n";
-    }
-
-    return 1;
-}
-
 # vzdump restore implementaion
 
 sub tar_archive_read_firstfile {
@@ -5462,18 +5595,8 @@ sub tar_archive_read_firstfile {
 
     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
 
-	my $cmd = undef;
-
-	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
-		my $fullbackup = $archive;
-		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
-		$cmd = "-|pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar t|";
-	} else {
-		$cmd = "-|tar tf '$archive'|";
-	}
-
     # try to detect archive type first
-    my $pid = open (my $fh, $cmd) ||
+    my $pid = open (my $fh, '-|', 'tar', 'tf', $archive) ||
 	die "unable to open file '$archive'\n";
     my $firstfile = <$fh>;
     kill 15, $pid;
@@ -5838,16 +5961,6 @@ sub restore_vma_archive {
 	$add_pipe->($cmd);
     }
 
-	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
-		my $fullbackup = $archive;
-		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
-		print "extracting from differential archive, using full backup '$fullbackup'\n";
-		$readfrom = '-';
-		my $qfullbackup = PVE::Tools::shellquote($fullbackup);
-		my $qarchive = PVE::Tools::shellquote($archive);
-		my $uncomp = "pve-xdelta3 -q -d -c -R -s '$qfullbackup' '$qarchive'|";
-	}
-
     my $tmpdir = "/var/tmp/vzdumptmp$$";
     rmtree $tmpdir;
 
@@ -6132,17 +6245,8 @@ sub restore_tar_archive {
 
     # tar option "xf" does not autodetect compression when read from STDIN,
     # so we pipe to zcat
-	my $cmd = undef;
-
-	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
-		my $fullbackup = $archive;
-		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
-		print "extracting from differential archive, using full backup '$fullbackup'\n";
-		$cmd = "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar x " . PVE::Tools::shellquote("--to-command=$tocmd");
-	} else {
-		$cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
-		PVE::Tools::shellquote("--to-command=$tocmd");
-	}
+    my $cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
+	PVE::Tools::shellquote("--to-command=$tocmd");
 
     my $tmpdir = "/var/tmp/vzdumptmp$$";
     mkpath $tmpdir;
@@ -6618,7 +6722,7 @@ sub qemu_machine_feature_enabled {
     my $current_major;
     my $current_minor;
 
-    if ($machine && $machine =~ m/^(pc(-i440fx|-q35)?-(\d+)\.(\d+))/) {
+    if ($machine && $machine =~ m/^((?:pc(-i440fx|-q35)?|virt)-(\d+)\.(\d+))/) {
 
 	$current_major = $3;
 	$current_minor = $4;
@@ -6668,41 +6772,23 @@ sub qemu_use_old_bios_files {
     return ($use_old_bios_files, $machine_type);
 }
 
-sub create_efidisk {
-    my ($storecfg, $storeid, $vmid, $fmt) = @_;
+sub create_efidisk($$$$$) {
+    my ($storecfg, $storeid, $vmid, $fmt, $arch) = @_;
 
-    die "EFI vars default image not found\n" if ! -f $OVMF_VARS;
+    my (undef, $ovmf_vars) = get_ovmf_files($arch);
+    die "EFI vars default image not found\n" if ! -f $ovmf_vars;
 
-    my $vars_size = PVE::Tools::convert_size(-s $OVMF_VARS, 'b' => 'kb');
+    my $vars_size = PVE::Tools::convert_size(-s $ovmf_vars, 'b' => 'kb');
     my $volid = PVE::Storage::vdisk_alloc($storecfg, $storeid, $vmid, $fmt, undef, $vars_size);
     PVE::Storage::activate_volumes($storecfg, [$volid]);
 
     my $path = PVE::Storage::path($storecfg, $volid);
     eval {
-	run_command(['/usr/bin/qemu-img', 'convert', '-n', '-f', 'raw', '-O', $fmt, $OVMF_VARS, $path]);
+	run_command(['/usr/bin/qemu-img', 'convert', '-n', '-f', 'raw', '-O', $fmt, $ovmf_vars, $path]);
     };
     die "Copying EFI vars image failed: $@" if $@;
 
     return ($volid, $vars_size);
-}
-
-sub lspci {
-
-    my $devices = {};
-
-    dir_glob_foreach("$pcisysfs/devices", '[a-f0-9]{4}:([a-f0-9]{2}:[a-f0-9]{2})\.([0-9])', sub {
-            my (undef, $id, $function) = @_;
-	    my $res = { id => $id, function => $function};
-	    push @{$devices->{$id}}, $res;
-    });
-
-    # Entries should be sorted by functions.
-    foreach my $id (keys %$devices) {
-	my $dev = $devices->{$id};
-	$devices->{$id} = [ sort { $a->{function} <=> $b->{function} } @$dev ];
-    }
-
-    return $devices;
 }
 
 sub vm_iothreads_list {
@@ -6831,6 +6917,12 @@ sub generate_smbios1_uuid {
     return "uuid=".generate_uuid();
 }
 
+sub nbd_stop {
+    my ($vmid) = @_;
+
+    vm_mon_cmd($vmid, 'nbd-server-stop');
+}
+
 # bash completion helper
 
 sub complete_backup_archives {
@@ -6902,12 +6994,6 @@ sub complete_storage {
     }
 
     return $res;
-}
-
-sub nbd_stop {
-    my ($vmid) = @_;
-
-    vm_mon_cmd($vmid, 'nbd-server-stop');
 }
 
 1;

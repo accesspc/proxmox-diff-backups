@@ -421,7 +421,7 @@ sub parse_volname {
 	return ('vztmpl', $1);
     } elsif ($volname =~ m!^rootdir/(\d+)$!) {
 	return ('rootdir', $1, $1);
-    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo)))$!) {
+    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo)))$!) {
 	my $fn = $1;
 	if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
 	    return ('backup', $fn, $2);
@@ -947,6 +947,18 @@ sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
     # do nothing by default
+}
+
+sub map_volume {
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+
+    return undef;
+}
+
+sub unmap_volume {
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+
+    return 1;
 }
 
 sub activate_volume {

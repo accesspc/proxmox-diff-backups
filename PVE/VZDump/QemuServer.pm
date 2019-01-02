@@ -237,7 +237,7 @@ sub assemble {
 }
 
 sub archive {
-    my ($self, $task, $vmid, $filename, $comp, $basefile) = @_;
+    my ($self, $task, $vmid, $filename, $comp) = @_;
 
     my $conffile = "$task->{tmpdir}/qemu-server.conf";
     my $firewall = "$task->{tmpdir}/qemu-server.fw";
@@ -346,15 +346,6 @@ sub archive {
 	    $outfh = IO::File->new($filename, "w") ||
 		die "unable to open file '$filename' - $!\n";
 	}
-
-    if ($basefile) {
-        my $basecmd = "pve-xdelta3 -e -q -c -s '$basefile'";
-        if ($comp) {
-        $comp = "$basecmd|$comp";
-        } else {
-        $comp = $basecmd;
-        }
-    }
 
 	my $outfileno;
 	if ($comp) {

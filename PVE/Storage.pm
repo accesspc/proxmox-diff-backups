@@ -37,7 +37,11 @@ use PVE::Storage::ZFSPlugin;
 use PVE::Storage::DRBDPlugin;
 
 # Storage API version. Icrement it on changes in storage API interface.
-use constant APIVER => 1;
+use constant APIVER => 2;
+# Age is the number of versions we're backward compatible with.
+# This is like having 'current=APIVER' and age='APIAGE' in libtool,
+# see https://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
+use constant APIAGE => 1;
 
 # load standard plugins
 PVE::Storage::DirPlugin->register();
@@ -65,18 +69,29 @@ if ( -d '/usr/share/perl5/PVE/Storage/Custom' ) {
 
 	eval {
 	    require $file;
+
+	    # Check perl interface:
+	    die "not derived from PVE::Storage::Plugin\n"
+		if !$modname->isa('PVE::Storage::Plugin');
+	    die "does not provide an api() method\n"
+		if !$modname->can('api');
+	    # Check storage API version and that file is really storage plugin.
+	    my $version = $modname->api();
+	    die "implements an API version newer than current ($version > " . APIVER . ")\n"
+		if $version > APIVER;
+	    my $min_version = (APIVER - APIAGE);
+	    die "API version too old, please update the plugin ($version < $min_version)\n"
+		if $version < $min_version;
+	    import $file;
+	    $modname->register();
+
+	    # If we got this far and the API version is not the same, make some
+	    # noise:
+	    warn "Plugin \"$modname\" is implementing an older storage API, an upgrade is recommended\n"
+		if $version != APIVER;
 	};
 	if ($@) {
-	    warn $@;
-	# Check storage API version and that file is really storage plugin.
-	} elsif ($modname->isa('PVE::Storage::Plugin') && $modname->can('api') && $modname->api() == APIVER) {
-            eval {
-	        import $file;
-	        $modname->register();
-            };
-            warn $@ if $@;
-	} else {
-	    warn "Error loading storage plugin \"$modname\" because of API version mismatch. Please, update it.\n"
+	    warn "Error loading storage plugin \"$modname\": $@";
 	}
     });
 }
@@ -496,7 +511,7 @@ sub path_to_volume_id {
 	} elsif ($path =~ m!^$privatedir/(\d+)$!) {
 	    my $vmid = $1;
 	    return ('rootdir', "$sid:rootdir/$vmid");
-	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!) {
+	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!) {
 	    my $name = $1;
 	    return ('iso', "$sid:backup/$name");
 	}
@@ -671,6 +686,30 @@ sub vdisk_create_base {
     });
 }
 
+sub map_volume {
+    my ($cfg, $volid, $snapname) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    my $scfg = storage_config($cfg, $storeid);
+
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->map_volume($storeid, $scfg, $volname, $snapname);
+}
+
+sub unmap_volume {
+    my ($cfg, $volid, $snapname) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    my $scfg = storage_config($cfg, $storeid);
+
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->unmap_volume($storeid, $scfg, $volname, $snapname);
+}
+
 sub vdisk_alloc {
     my ($cfg, $storeid, $vmid, $fmt, $name, $size) = @_;
 
@@ -782,7 +821,7 @@ sub template_list {
 		    $info = { volid => "$sid:vztmpl/$1", format => "t$2" };
 
 		} elsif ($tt eq 'backup') {
-		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!;
+		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!;
 
 		    $info = { volid => "$sid:backup/$1", format => $2 };
 		}
@@ -1190,62 +1229,6 @@ sub resolv_portal {
     raise_param_exc({ portal => "unable to resolve portal address '$portal'" });
 }
 
-# idea is from usbutils package (/usr/bin/usb-devices) script
-sub __scan_usb_device {
-    my ($res, $devpath, $parent, $level) = @_;
-
-    return if ! -d $devpath;
-    return if $level && $devpath !~ m/^.*[-.](\d+)$/;
-    my $port = $level ? int($1 - 1) : 0;
-
-    my $busnum = int(file_read_firstline("$devpath/busnum"));
-    my $devnum = int(file_read_firstline("$devpath/devnum"));
-
-    my $d = {
-	port => $port,
-	level => $level,
-	busnum => $busnum,
-	devnum => $devnum,
-	speed => file_read_firstline("$devpath/speed"),
-	class => hex(file_read_firstline("$devpath/bDeviceClass")),
-	vendid => file_read_firstline("$devpath/idVendor"),
-	prodid => file_read_firstline("$devpath/idProduct"),
-    };
-
-    if ($level) {
-	my $usbpath = $devpath;
-	$usbpath =~ s|^.*/\d+\-||;
-	$d->{usbpath} = $usbpath;
-    }
-
-    my $product = file_read_firstline("$devpath/product");
-    $d->{product} = $product if $product;
-
-    my $manu = file_read_firstline("$devpath/manufacturer");
-    $d->{manufacturer} = $manu if $manu;
-
-    my $serial => file_read_firstline("$devpath/serial");
-    $d->{serial} = $serial if $serial;
-
-    push @$res, $d;
-
-    foreach my $subdev (<$devpath/$busnum-*>) {
-	next if $subdev !~ m|/$busnum-[0-9]+(\.[0-9]+)*$|;
-	__scan_usb_device($res, $subdev, $devnum, $level + 1);
-    }
-
-};
-
-sub scan_usb {
-
-    my $devlist = [];
-
-    foreach my $device (</sys/bus/usb/devices/usb*>) {
-	__scan_usb_device($devlist, $device, 0, 0);
-    }
-
-    return $devlist;
-}
 
 sub scan_iscsi {
     my ($portal_in) = @_;
@@ -1336,30 +1319,13 @@ sub foreach_volid {
     }
 }
 
-sub get_full_backup {
-    my ($archive) = @_;
-    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
-        my $fullbackup = $archive;
-        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
-        return $fullbackup;
-    }
-    return undef;
-}
-
 sub extract_vzdump_config_tar {
     my ($archive, $conf_re) = @_;
 
     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
 
-    my $pid;
-    my $fh;
-
-    if (my $fullbackup = get_full_backup($archive)) {
-        $pid = open($fh, '-|', 'bash', '-c' , "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' | tar tf -")
-            || die "unable to open file '$archive'\n";
-    } else {
-        $pid = open($fh, '-|', 'tar', 'tf', $archive) || die "unable to open file '$archive'\n";
-    }
+    my $pid = open(my $fh, '-|', 'tar', 'tf', $archive) ||
+       die "unable to open file '$archive'\n";
 
     my $file;
     while (defined($file = <$fh>)) {
@@ -1382,15 +1348,7 @@ sub extract_vzdump_config_tar {
 	$raw .= "$output\n";
     };
 
-    my $cmd = ['tar', '-xpOf', $archive, $file, '--occurrence'];
-    if (my $fullbackup = get_full_backup($archive)) {
-        $cmd = [
-            [ "bash", "-c", "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' || true" ],
-            [ 'tar', '-xpOf', '-', $file, '--occurrence' ]
-        ];
-    }
-
-    PVE::Tools::run_command($cmd, outfunc => $out);
+    PVE::Tools::run_command(['tar', '-xpOf', $archive, $file, '--occurrence'], outfunc => $out);
 
     return wantarray ? ($raw, $file) : $raw;
 }
