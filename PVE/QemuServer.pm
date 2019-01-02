@@ -5595,8 +5595,18 @@ sub tar_archive_read_firstfile {
 
     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
 
+	my $cmd = undef;
+
+	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
+		my $fullbackup = $archive;
+		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
+		$cmd = "-|pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar t|";
+	} else {
+		$cmd = "-|tar tf '$archive'|";
+	}
+
     # try to detect archive type first
-    my $pid = open (my $fh, '-|', 'tar', 'tf', $archive) ||
+    my $pid = open (my $fh, $cmd) ||
 	die "unable to open file '$archive'\n";
     my $firstfile = <$fh>;
     kill 15, $pid;
@@ -5961,6 +5971,16 @@ sub restore_vma_archive {
 	$add_pipe->($cmd);
     }
 
+	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
+		my $fullbackup = $archive;
+		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(vma(\.(gz|lzo))?))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
+		print "extracting from differential archive, using full backup '$fullbackup'\n";
+		$readfrom = '-';
+		my $qfullbackup = PVE::Tools::shellquote($fullbackup);
+		my $qarchive = PVE::Tools::shellquote($archive);
+		my $uncomp = "pve-xdelta3 -q -d -c -R -s '$qfullbackup' '$qarchive'|";
+	}
+
     my $tmpdir = "/var/tmp/vzdumptmp$$";
     rmtree $tmpdir;
 
@@ -6245,8 +6265,17 @@ sub restore_tar_archive {
 
     # tar option "xf" does not autodetect compression when read from STDIN,
     # so we pipe to zcat
-    my $cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
-	PVE::Tools::shellquote("--to-command=$tocmd");
+	my $cmd = undef;
+
+	if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
+		my $fullbackup = $archive;
+		$fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
+		print "extracting from differential archive, using full backup '$fullbackup'\n";
+		$cmd = "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' |tar x " . PVE::Tools::shellquote("--to-command=$tocmd");
+	} else {
+		$cmd = "zcat -f|tar xf " . PVE::Tools::shellquote($archive) . " " .
+		PVE::Tools::shellquote("--to-command=$tocmd");
+	}
 
     my $tmpdir = "/var/tmp/vzdumptmp$$";
     mkpath $tmpdir;
