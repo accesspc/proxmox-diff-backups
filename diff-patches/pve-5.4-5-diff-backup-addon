@@ -1,3 +1,50 @@
+#!/bin/bash
+
+echo "Proxmox VE 5.3 - differential backup support, v1.1"
+echo "Robertas Reiciunas, https://reiciunas.lt/, accesspc@gmail.com"
+echo " based on Kamil Trzcinski, http://ayufan.eu/, ayufan@ayufan.eu"
+echo " modified and tested on pve-manager/5.3-6/37b3c8df (running kernel: 4.15.18-8-pve)"
+echo ""
+
+function pve_manager_patch() {
+cat <<"EOF"
+diff --git a/pve-manager/js/pvemanagerlib.js b/pve-manager/js/pvemanagerlib.js
+index 54e7f6c..2b6a2b2 100644
+--- a/pve-manager/js/pvemanagerlib.js
++++ b/pve-manager/js/pvemanagerlib.js
+@@ -36388,7 +36388,26 @@ Ext.define('PVE.dc.BackupEdit', {
+ 		fieldLabel: gettext('Mode'),
+ 		value: 'snapshot',
+ 		name: 'mode'
+-	    },
++		},
++		{
++		xtype: 'numberfield',
++		fieldLabel: gettext('Max Backups'),
++		name: 'maxfiles',
++		minValue: 0,
++		maxValue: 365,
++		value: me.create ? '1' : undefined,
++		allowBlank: false
++		},
++		{
++		xtype: 'numberfield',
++		fieldLabel: gettext('Full Backup Every'),
++		name: 'fullbackup',
++		emptyText : gettext('Days'),
++		minValue: 0,
++		maxValue: 60,
++		value: me.create ? '0' : undefined,
++		allowBlank: true
++		},
+ 	    {
+ 		xtype: 'proxmoxcheckbox',
+ 		fieldLabel: gettext('Enable'),
+EOF
+}
+
+function pve_perl_patch() {
+cat <<"EOF"
 diff --git a/PVE/LXC/Create.pm b/PVE/LXC/Create.pm
 index c0ef1d7..0e10641 100644
 --- a/PVE/LXC/Create.pm
@@ -344,35 +391,57 @@ index 70abe99..f9b4d2c 100644
  	my $outfileno;
  	if ($comp) {
  	    my @pipefd = POSIX::pipe();
-diff --git a/pve-manager/js/pvemanagerlib.js b/pve-manager/js/pvemanagerlib.js
-index 54e7f6c..2b6a2b2 100644
---- a/pve-manager/js/pvemanagerlib.js
-+++ b/pve-manager/js/pvemanagerlib.js
-@@ -36388,7 +36388,26 @@ Ext.define('PVE.dc.BackupEdit', {
- 		fieldLabel: gettext('Mode'),
- 		value: 'snapshot',
- 		name: 'mode'
--	    },
-+		},
-+		{
-+		xtype: 'numberfield',
-+		fieldLabel: gettext('Max Backups'),
-+		name: 'maxfiles',
-+		minValue: 0,
-+		maxValue: 365,
-+		value: me.create ? '1' : undefined,
-+		allowBlank: false
-+		},
-+		{
-+		xtype: 'numberfield',
-+		fieldLabel: gettext('Full Backup Every'),
-+		name: 'fullbackup',
-+		emptyText : gettext('Days'),
-+		minValue: 0,
-+		maxValue: 60,
-+		value: me.create ? '0' : undefined,
-+		allowBlank: true
-+		},
- 	    {
- 		xtype: 'proxmoxcheckbox',
- 		fieldLabel: gettext('Enable'),
+EOF
+}
+
+function patch_revert() {
+        patch --reverse --quiet -p1 --batch --ignore-whitespace -d $*
+}
+
+function patch_apply() {
+        patch --forward -p1 --batch --ignore-whitespace -d $*
+}
+
+case $1 in
+revert)
+        if pve_manager_patch | patch_revert /usr/share/ --dry-run
+        then
+                pve_manager_patch | patch_revert /usr/share/
+                echo "RESTORED: /usr/share/"
+        fi
+        if pve_perl_patch | patch_revert /usr/share/perl5/ --dry-run
+        then
+                pve_perl_patch | patch_revert /usr/share/perl5/
+                echo "RESTORED: /usr/share/perl5/"
+        fi
+        echo ""
+        service pveproxy restart
+        service pvedaemon restart
+        ;;
+
+apply)
+        if pve_manager_patch | patch_apply /usr/share/ --dry-run --batch
+        then
+                pve_manager_patch | patch_apply /usr/share/
+                echo "PATCHED: /usr/share/"
+        fi
+        if pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch
+        then
+                pve_perl_patch | patch_apply /usr/share/perl5/
+                echo "PATCHED: /usr/share/perl5/"
+        fi
+        echo ""
+        service pveproxy restart
+        service pvedaemon restart
+        ;;
+
+test)
+        pve_manager_patch | patch_apply /usr/share/ --dry-run --batch || true
+        pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch || true
+        ;;
+
+*)
+        echo "usage: $0 [apply|revert|test]"
+        exit 1
+        ;;
+esac
