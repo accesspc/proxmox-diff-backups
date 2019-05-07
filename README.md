@@ -71,8 +71,7 @@ git checkout -b $version
 ```
 git commit -am "$version patched"
 git diff HEAD^ > diff-patches/diff.patch
-git add .
-git commit -am "$version diff.patch"
+#git commit -am "$version diff.patch"
 git push origin $version
 ```
 
