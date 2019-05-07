@@ -8,11 +8,10 @@ use IO::File;
 use IO::Select;
 use IPC::Open3;
 use File::Path;
-use File::Basename;
 use PVE::RPCEnvironment;
 use PVE::Storage;
 use PVE::Cluster qw(cfs_read_file);
-use Time::localtime;
+use POSIX qw(strftime);
 use Time::Local;
 use PVE::JSONSchema qw(get_standard_option);
 use PVE::HA::Env::PVE2;
@@ -22,9 +21,7 @@ use PVE::VZDump::Plugin;
 my @posix_filesystems = qw(ext3 ext4 nfs nfs4 reiserfs xfs);
 
 my $lockfile = '/var/run/vzdump.lock';
-
 my $pidfile = '/var/run/vzdump.pid';
-
 my $logdir = '/var/log/vzdump';
 
 my @plugins = qw();
@@ -171,13 +168,6 @@ my $confdesc = {
 	optional => 1,
 	minimum => 1,
 	default => 1,
-    },
-    fullbackup => {
-    type => 'integer',
-    description => "Maximal days of validity for full backups to be used for creating differentials.",
-    optional => 1,
-    minimum => 0,
-    default => 0,
     },
     remove => {
 	type => 'boolean',
@@ -745,22 +735,6 @@ sub get_backup_file_list {
 
     return $bklist;
 }
-
-sub get_differential_backup_file_list {
-	my ($dir, $bkname, $exclude_fn) = @_;
-
-	my $bklist = [];
-	foreach my $fn (<$dir/${bkname}-*>) {
-		next if $exclude_fn && $fn eq $exclude_fn;
-		if ($fn =~ m!/(${bkname}--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?)$!) {
-			$fn = "$dir/$1"; # untaint
-			my $t = timelocal ($7, $6, $5, $4, $3 - 1, $2 - 1900);
-			push @$bklist, [$fn, $t];
-		}
-	}
-
-	return $bklist;
-}
  
 sub exec_backup_task {
     my ($self, $task) = @_;
@@ -794,12 +768,8 @@ sub exec_backup_task {
 
 	my $tmplog = "$logdir/$vmtype-$vmid.log";
 
-	my $lt = localtime();
-
 	my $bkname = "vzdump-$vmtype-$vmid";
-	my $basename = sprintf "${bkname}-%04d_%02d_%02d-%02d_%02d_%02d", 
-	$lt->year + 1900, $lt->mon + 1, $lt->mday, 
-	$lt->hour, $lt->min, $lt->sec;
+	my $basename = $bkname . strftime("-%Y_%m_%d-%H_%M_%S", localtime());
 
 	my $maxfiles = $opts->{maxfiles};
 
@@ -809,40 +779,13 @@ sub exec_backup_task {
 		if scalar(@$bklist) >= $maxfiles;
 	}
 
+	my $logfile = $task->{logfile} = "$opts->{dumpdir}/$basename.log";
+
 	my $ext = $vmtype eq 'qemu' ? '.vma' : '.tar';
 	my ($comp, $comp_ext) = compressor_info($opts);
 	if ($comp && $comp_ext) {
 	    $ext .= ".${comp_ext}";
 	}
-
-    my $fullbackup = undef;
-    if ($opts->{fullbackup} && !$opts->{stdout}) {
-        my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
-        $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
-        my $mintime = timelocal ($lt->sec, $lt->min, $lt->hour,
-        $lt->mday, $lt->mon, $lt->year) -
-        $opts->{fullbackup} * 24 * 60 * 60 -
-        12 * 60 * 60; # - 12h just to make sure that on last day we create full backup
-
-        foreach my $d (@$bklist) {
-        next if $mintime > $d->[1];
-
-        $fullbackup = $d->[0];
-        $basename = basename($fullbackup);
-        $basename = sprintf "${basename}--differential-%04d_%02d_%02d-%02d_%02d_%02d",
-            $lt->year + 1900, $lt->mon + 1, $lt->mday,
-            $lt->hour, $lt->min, $lt->sec;
-        $ext = ".vcdiff";
-
-        debugmsg ('info', "doing differential backup against '$fullbackup'");
-        last;
-        }
-
-        debugmsg ('info', "doing full backup, because no backup found in last $opts->{fullbackup} day(s)")
-        if !$fullbackup;
-    }
-
-    my $logfile = $task->{logfile} = "$opts->{dumpdir}/$basename.log";
 
 	if ($opts->{stdout}) {
 	    $task->{tarfile} = '-';
@@ -884,7 +827,8 @@ sub exec_backup_task {
 
 	unlink $logfile;
 
-	debugmsg ('info',  "Starting Backup of VM $vmid ($vmtype)", $logfd, 1);
+	debugmsg ('info', "Starting Backup of VM $vmid ($vmtype)", $logfd, 1);
+	debugmsg ('info', "Backup started at " . strftime("%F %H:%M:%S", localtime()));
 
 	$plugin->set_logfd ($logfd);
 
@@ -1010,7 +954,7 @@ sub exec_backup_task {
 
 	if ($opts->{stdout}) {
 	    debugmsg ('info', "sending archive to stdout", $logfd);
-	    $plugin->archive($task, $vmid, $task->{tmptar}, $comp, $fullbackup);
+	    $plugin->archive($task, $vmid, $task->{tmptar}, $comp);
 	    $self->run_hook_script ('backup-end', $task, $logfd);
 	    return;
 	}
@@ -1028,7 +972,7 @@ sub exec_backup_task {
 
 	# purge older backup
 
-	if ($maxfiles && $opts->{remove} && !$fullbackup) {
+	if ($maxfiles && $opts->{remove}) {
 	    my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname, $task->{tarfile});
 	    $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
 
@@ -1039,16 +983,6 @@ sub exec_backup_task {
 		my $logfn = $d->[0];
 		$logfn =~ s/\.(tgz|((tar|vma)(\.(gz|lzo))?))$/\.log/;
 		unlink $logfn;
-
-        my $dbklist = get_differential_backup_file_list($opts->{dumpdir}, basename($d->[0]));
-
-        foreach my $df (@$dbklist) {
-            debugmsg ('info', "delete old differential backup '$df->[0]'", $logfd);
-            unlink $df->[0];
-            $logfn = $df->[0];
-            $logfn =~ s/\.(vcdiff(\.(gz|lzo))?)$/\.log/;
-            unlink $logfn;
-        }
 	    }
 	}
 
@@ -1110,6 +1044,7 @@ sub exec_backup_task {
 	$task->{state} = 'err';
 	$task->{msg} = $err;
 	debugmsg ('err', "Backup of VM $vmid failed - $err", $logfd, 1);
+	debugmsg ('info', "Failed at " . strftime("%F %H:%M:%S", localtime()));
 
 	eval { $self->run_hook_script ('backup-abort', $task, $logfd); };
 
@@ -1117,6 +1052,7 @@ sub exec_backup_task {
 	$task->{state} = 'ok';
 	my $tstr = format_time ($delay);
 	debugmsg ('info', "Finished Backup of VM $vmid ($tstr)", $logfd, 1);
+	debugmsg ('info', "Backup finished at " . strftime("%F %H:%M:%S", localtime()));
     }
 
     close ($logfd) if $logfd;

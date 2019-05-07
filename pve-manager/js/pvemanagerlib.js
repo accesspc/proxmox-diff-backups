@@ -147,6 +147,11 @@ var pveOnlineHelpInfo = {
       "link" : "/pve-docs/pve-admin-guide.html",
       "title" : "Proxmox VE Administration Guide"
    },
+   "pve_ceph_install" : {
+      "link" : "/pve-docs/chapter-pveceph.html#pve_ceph_install",
+      "subtitle" : "Installation of Ceph Packages",
+      "title" : "Manage Ceph Services on Proxmox VE Nodes"
+   },
    "pve_ceph_monitors" : {
       "link" : "/pve-docs/chapter-pveceph.html#pve_ceph_monitors",
       "subtitle" : "Creating Ceph Monitors",
@@ -240,6 +245,11 @@ var pveOnlineHelpInfo = {
       "subtitle" : "Roles",
       "title" : "User Management"
    },
+   "pveum_tfa_auth" : {
+      "link" : "/pve-docs/chapter-pveum.html#pveum_tfa_auth",
+      "subtitle" : "Two factor authentication",
+      "title" : "User Management"
+   },
    "pveum_users" : {
       "link" : "/pve-docs/chapter-pveum.html#pveum_users",
       "subtitle" : "Users",
@@ -306,6 +316,11 @@ var pveOnlineHelpInfo = {
    "qm_startup_and_shutdown" : {
       "link" : "/pve-docs/chapter-qm.html#qm_startup_and_shutdown",
       "subtitle" : "Automatic Start and Shutdown of Virtual Machines",
+      "title" : "Qemu/KVM Virtual Machines"
+   },
+   "qm_system_settings" : {
+      "link" : "/pve-docs/chapter-qm.html#qm_system_settings",
+      "subtitle" : "System Settings",
       "title" : "Qemu/KVM Virtual Machines"
    },
    "qm_usb_passthrough" : {
@@ -384,6 +399,7 @@ Ext.Ajax.defaultHeaders = {
     'Accept': 'application/json'
 };
 
+/*jslint confusion: true */
 Ext.define('PVE.Utils', { utilities: {
 
     // this singleton contains miscellaneous utilities
@@ -592,6 +608,10 @@ Ext.define('PVE.Utils', { utilities: {
 	return agentstring;
     },
 
+    render_qemu_machine: function(value) {
+	return value || (Proxmox.Utils.defaultText + ' (i440fx)');
+    },
+
     render_qemu_bios: function(value) {
 	if (!value) {
 	    return Proxmox.Utils.defaultText + ' (SeaBIOS)';
@@ -602,6 +622,18 @@ Ext.define('PVE.Utils', { utilities: {
 	} else {
 	    return value;
 	}
+    },
+
+    render_dc_ha_opts: function(value) {
+	if (!value) {
+	    return Proxmox.Utils.defaultText;
+	} else {
+	    return PVE.Parser.printPropertyString(value);
+	}
+    },
+    render_as_property_string: function(value) {
+	return (!value) ? Proxmox.Utils.defaultText
+	    : PVE.Parser.printPropertyString(value);
     },
 
     render_scsihw: function(value) {
@@ -672,7 +704,9 @@ Ext.define('PVE.Utils', { utilities: {
 	serial0: gettext('Serial terminal') + ' 0',
 	serial1: gettext('Serial terminal') + ' 1',
 	serial2: gettext('Serial terminal') + ' 2',
-	serial3: gettext('Serial terminal') + ' 3'
+	serial3: gettext('Serial terminal') + ' 3',
+	virtio: 'VirtIO-GPU',
+	none: Proxmox.Utils.noneText
     },
 
     render_kvm_language: function (value) {
@@ -800,11 +834,14 @@ Ext.define('PVE.Utils', { utilities: {
 	return days.toFixed(1) + 'd';
     },
 
-    imagesText: gettext('Disk image'),
-    backupFileText: gettext('VZDump backup file'),
-    vztmplText: gettext('Container template'),
-    isoImageText: gettext('ISO image'),
-    containersText: gettext('Container'),
+    contentTypes: {
+	'images': gettext('Disk image'),
+	'backup': gettext('VZDump backup file'),
+	'vztmpl': gettext('Container template'),
+	'iso': gettext('ISO image'),
+	'rootdir': gettext('Container'),
+	'snippets': gettext('Snippets')
+    },
 
     storageSchema: {
 	dir: {
@@ -914,23 +951,9 @@ Ext.define('PVE.Utils', { utilities: {
     },
 
     format_content_types: function(value) {
-	var cta = [];
-
-	Ext.each(value.split(',').sort(), function(ct) {
-	    if (ct === 'images') {
-		cta.push(PVE.Utils.imagesText);
-	    } else if (ct === 'backup') {
-		cta.push(PVE.Utils.backupFileText);
-	    } else if (ct === 'vztmpl') {
-		cta.push(PVE.Utils.vztmplText);
-	    } else if (ct === 'iso') {
-		cta.push(PVE.Utils.isoImageText);
-	    } else if (ct === 'rootdir') {
-		cta.push(PVE.Utils.containersText);
-	    }
-	});
-
-	return cta.join(', ');
+	return value.split(',').sort().map(function(ct) {
+	    return PVE.Utils.contentTypes[ct] || ct;
+	}).join(', ');
     },
 
     render_storage_content: function(value, metaData, record) {
@@ -1177,17 +1200,28 @@ Ext.define('PVE.Utils', { utilities: {
 	return Ext.htmlEncode(first + " " + last);
     },
 
+    render_u2f_error: function(error) {
+	var ErrorNames = {
+	    '1': gettext('Other Error'),
+	    '2': gettext('Bad Request'),
+	    '3': gettext('Configuration Unsupported'),
+	    '4': gettext('Device Ineligible'),
+	    '5': gettext('Timeout')
+	};
+	return "U2F Error: "  + ErrorNames[error] || Proxmox.Utils.unknownText;
+    },
+
     windowHostname: function() {
 	return window.location.hostname.replace(Proxmox.Utils.IP6_bracket_match,
             function(m, addr, offset, original) { return addr; });
     },
 
-    openDefaultConsoleWindow: function(consoles, vmtype, vmid, nodename, vmname) {
+    openDefaultConsoleWindow: function(consoles, vmtype, vmid, nodename, vmname, cmd) {
 	var dv = PVE.Utils.defaultViewer(consoles);
-	PVE.Utils.openConsoleWindow(dv, vmtype, vmid, nodename, vmname);
+	PVE.Utils.openConsoleWindow(dv, vmtype, vmid, nodename, vmname, cmd);
     },
 
-    openConsoleWindow: function(viewer, vmtype, vmid, nodename, vmname) {
+    openConsoleWindow: function(viewer, vmtype, vmid, nodename, vmname, cmd) {
 	// kvm, lxc, shell, upgrade
 
 	if (vmid == undefined && (vmtype === 'kvm' || vmtype === 'lxc')) {
@@ -1199,9 +1233,9 @@ Ext.define('PVE.Utils', { utilities: {
 	}
 
 	if (viewer === 'html5') {
-	    PVE.Utils.openVNCViewer(vmtype, vmid, nodename, vmname);
+	    PVE.Utils.openVNCViewer(vmtype, vmid, nodename, vmname, cmd);
 	} else if (viewer === 'xtermjs') {
-	    Proxmox.Utils.openXtermJsViewer(vmtype, vmid, nodename, vmname);
+	    Proxmox.Utils.openXtermJsViewer(vmtype, vmid, nodename, vmname, cmd);
 	} else if (viewer === 'vv') {
 	    var url;
 	    var params = { proxy: PVE.Utils.windowHostname() };
@@ -1217,6 +1251,10 @@ Ext.define('PVE.Utils', { utilities: {
 	    } else if (vmtype === 'upgrade') {
 		url = '/nodes/' + nodename + '/spiceshell';
 		params.upgrade = 1;
+		PVE.Utils.openSpiceViewer(url, params);
+	    } else if (vmtype === 'cmd') {
+		url = '/nodes/' + nodename + '/spiceshell';
+		params.cmd = cmd;
 		PVE.Utils.openSpiceViewer(url, params);
 	    }
 	} else {
@@ -1244,17 +1282,20 @@ Ext.define('PVE.Utils', { utilities: {
 	return dv;
     },
 
-    openVNCViewer: function(vmtype, vmid, nodename, vmname) {
-	var url = Ext.urlEncode({
+    openVNCViewer: function(vmtype, vmid, nodename, vmname, cmd) {
+	var url = Ext.Object.toQueryString({
 	    console: vmtype, // kvm, lxc, upgrade or shell
 	    novnc: 1,
 	    vmid: vmid,
 	    vmname: vmname,
 	    node: nodename,
-	    resize: 'off'
+	    resize: 'off',
+	    cmd: cmd
 	});
 	var nw = window.open("?" + url, '_blank', "innerWidth=745,innerheight=427");
-	nw.focus();
+	if (nw) {
+	    nw.focus();
+	}
     },
 
     openSpiceViewer: function(url, params){
@@ -1368,6 +1409,7 @@ Ext.define('PVE.Utils', { utilities: {
 	}
 
 	menu.showAt(event.getXY());
+	return menu;
     },
 
     // helper for deleting field which are set to there default values
@@ -1455,6 +1497,66 @@ Ext.define('PVE.Utils', { utilities: {
 	    if (!cont && cont !== undefined) {
 		return;
 	    }
+	}
+    },
+
+    cleanEmptyObjectKeys: function (obj) {
+	var propName;
+	for (propName in obj) {
+	    if (obj.hasOwnProperty(propName)) {
+		if (obj[propName] === null || obj[propName] === undefined) {
+		    delete obj[propName];
+		}
+	    }
+	}
+    },
+
+    handleStoreErrorOrMask: function(me, store, regex, callback) {
+
+	me.mon(store, 'load', function (proxy, response, success, operation) {
+
+	    if (success) {
+		Proxmox.Utils.setErrorMask(me, false);
+		return;
+	    }
+	    var msg;
+
+	    if (operation.error.statusText) {
+		if (operation.error.statusText.match(regex)) {
+		    callback(me, operation.error);
+		    return;
+		} else {
+		    msg = operation.error.statusText + ' (' + operation.error.status + ')';
+		}
+	    } else {
+		msg = gettext('Connection error');
+	    }
+	    Proxmox.Utils.setErrorMask(me, msg);
+	});
+    },
+
+    showCephInstallOrMask: function(container, msg, nodename, callback){
+	var regex = new RegExp("not (installed|initialized)", "i");
+	if (msg.match(regex)) {
+	    if (Proxmox.UserName === 'root@pam') {
+		container.el.mask();
+		if (!container.down('pveCephInstallWindow')){
+		    var isInstalled = msg.match(/not initialized/i) ? true : false;
+		    var win = Ext.create('PVE.ceph.Install', {
+			nodename: nodename
+		    });
+		    win.getViewModel().set('isInstalled', isInstalled);
+		    container.add(win);
+		    win.show();
+		    callback(win);
+		}
+	    } else {
+		container.mask(Ext.String.format(gettext('{0} not installed.') +
+		    ' ' + gettext('Log in as root to install.'), 'Ceph'), ['pve-static-mask']);
+	    }
+	    return true;
+	} else {
+	    return false;
 	}
     }
 },
@@ -1886,12 +1988,15 @@ Ext.define('PVE.Parser', { statics: {
 	    if (!p || p.match(/^\s*$/)) {
 		return; // continue
 	    }
-	    var match_res = p.match(/^(bridge|hwaddr|mtu|name|ip|ip6|gw|gw6|firewall|tag|rate)=(\S+)$/);
-	    if (!match_res) {
+	    var match_res = p.match(/^(bridge|hwaddr|mtu|name|ip|ip6|gw|gw6|tag|rate)=(\S+)$/);
+	    if (match_res) {
+		data[match_res[1]] = match_res[2];
+	    } else if ((match_res = p.match(/^firewall=(\d+)$/)) !== null) {
+		data.firewall = PVE.Parser.parseBoolean(match_res[1]);
+	    } else {
 		// todo: simply ignore errors ?
 		return; // continue
 	    }
-	    data[match_res[1]] = match_res[2];
 	});
 
 	return data;
@@ -2063,6 +2168,20 @@ Ext.define('PVE.Parser', { statics: {
 	});
 
 	return res;
+    },
+
+    parseTfaType: function(value) {
+	/*jslint confusion: true*/
+	var match;
+	if (!value || !value.length) {
+	    return undefined;
+	} else if (value === 'x!oath') {
+	    return 'totp';
+	} else if (!!(match = value.match(/^x!(.+)$/))) {
+	    return match[1];
+	} else {
+	    return 1;
+	}
     },
 
     parseQemuCpu: function(value) {
@@ -2535,7 +2654,9 @@ Ext.define('PVE.button.ConsoleButton', {
     extend: 'Ext.button.Split',
     alias: 'widget.pveConsoleButton',
 
-    consoleType: 'shell', // one of 'shell', 'kvm', 'lxc', 'upgrade'
+    consoleType: 'shell', // one of 'shell', 'kvm', 'lxc', 'upgrade', 'cmd'
+
+    cmd: undefined,
 
     consoleName: undefined,
 
@@ -2571,7 +2692,7 @@ Ext.define('PVE.button.ConsoleButton', {
 	    xtermjs: me.enableXtermjs
 	};
 	PVE.Utils.openDefaultConsoleWindow(consoles, me.consoleType, me.vmid,
-					   me.nodename, me.consoleName);
+					   me.nodename, me.consoleName, me.cmd);
     },
 
     menu: [
@@ -2582,7 +2703,7 @@ Ext.define('PVE.button.ConsoleButton', {
 	    type: 'html5',
 	    handler: function(button) {
 		var me = this.up('button');
-		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName);
+		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName, me.cmd);
 	    }
 	},
 	{
@@ -2593,7 +2714,7 @@ Ext.define('PVE.button.ConsoleButton', {
 	    iconCls: 'pve-itype-icon-virt-viewer',
 	    handler: function(button) {
 		var me = this.up('button');
-		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName);
+		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName, me.cmd);
 	    }
 	},
 	{
@@ -2603,7 +2724,7 @@ Ext.define('PVE.button.ConsoleButton', {
 	    type: 'xtermjs',
 	    handler: function(button) {
 		var me = this.up('button');
-		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName);
+		PVE.Utils.openConsoleWindow(button.type, me.consoleType, me.vmid, me.nodename, me.consoleName, me.cmd);
 	    }
 	}
     ],
@@ -2784,6 +2905,10 @@ Ext.define('PVE.qemu.CmdMenu', {
 		running = true;
 		stopped = false;
 		break;
+	    case 'suspended':
+		stopped = false;
+		suspended = true;
+		break;
 	    case 'paused':
 		stopped = false;
 		suspended = true;
@@ -2797,23 +2922,40 @@ Ext.define('PVE.qemu.CmdMenu', {
 	    {
 		text: gettext('Start'),
 		iconCls: 'fa fa-fw fa-play',
+		hidden: running || suspended,
 		disabled: running || suspended,
 		handler: function() {
 		    vm_command('start');
 		}
 	    },
 	    {
-		text: gettext('Suspend'),
+		text: gettext('Pause'),
 		iconCls: 'fa fa-fw fa-pause',
-		hidden: suspended,
+		hidden: stopped || suspended,
 		disabled: stopped || suspended,
+		handler: function() {
+		    var msg = Proxmox.Utils.format_task_description('qmpause', vmid);
+		    Ext.Msg.confirm(gettext('Confirm'), msg, function(btn) {
+			if (btn !== 'yes') {
+			    return;
+			}
+			vm_command('suspend');
+		    });
+		}
+	    },
+	    {
+		text: gettext('Hibernate'),
+		iconCls: 'fa fa-fw fa-download',
+		hidden: stopped || suspended,
+		disabled: stopped || suspended,
+		tooltip: gettext('Suspend to disk'),
 		handler: function() {
 		    var msg = Proxmox.Utils.format_task_description('qmsuspend', vmid);
 		    Ext.Msg.confirm(gettext('Confirm'), msg, function(btn) {
 			if (btn !== 'yes') {
 			    return;
 			}
-			vm_command('suspend');
+			vm_command('suspend', { todisk: 1 });
 		    });
 		}
 	    },
@@ -2844,6 +2986,7 @@ Ext.define('PVE.qemu.CmdMenu', {
 		text: gettext('Stop'),
 		iconCls: 'fa fa-fw fa-stop',
 		disabled: stopped,
+		tooltip: Ext.String.format(gettext('Stop {0} immediately'), 'VM'),
 		handler: function() {
 		    var msg = Proxmox.Utils.format_task_description('qmstop', vmid);
 		    Ext.Msg.confirm(gettext('Confirm'), msg, function(btn) {
@@ -3030,6 +3173,7 @@ Ext.define('PVE.lxc.CmdMenu', {
 		text: gettext('Stop'),
 		iconCls: 'fa fa-fw fa-stop',
 		disabled: stopped,
+		tooltip: Ext.String.format(gettext('Stop {0} immediately'), 'CT'),
 		handler: function() {
 		    var msg = Proxmox.Utils.format_task_description('vzstop', vmid);
 		    Ext.Msg.confirm(gettext('Confirm'), msg, function(btn) {
@@ -3185,6 +3329,30 @@ Ext.define('PVE.node.CmdMenu', {
 		var me = this.up('menu');
 		PVE.Utils.openDefaultConsoleWindow(true, 'shell', undefined, me.nodename, undefined);
 	    }
+	},
+	{ xtype: 'menuseparator' },
+	{
+	    text: gettext('Wake-on-LAN'),
+	    itemId: 'wakeonlan',
+	    iconCls: 'fa fa-fw fa-power-off',
+	    handler: function() {
+		var me = this.up('menu');
+		Proxmox.Utils.API2Request({
+		    param: {},
+		    url: '/nodes/' + me.nodename + '/wakeonlan',
+		    method: 'POST',
+		    failure: function(response, opts) {
+			Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+		    },
+		    success: function(response, opts) {
+			Ext.Msg.show({
+			    title: 'Success',
+			    icon: Ext.Msg.INFO,
+			    msg: Ext.String.format(gettext("Wake on LAN packet send for '{0}': '{1}'"), me.nodename, response.result.data)
+			});
+		    }
+		});
+	    }
 	}
     ],
 
@@ -3209,10 +3377,15 @@ Ext.define('PVE.node.CmdMenu', {
 	    me.getComponent('bulkstart').setDisabled(true);
 	    me.getComponent('bulkstop').setDisabled(true);
 	    me.getComponent('bulkmigrate').setDisabled(true);
+	    me.getComponent('wakeonlan').setDisabled(true);
 	}
 
 	if (!caps.nodes['Sys.Console']) {
 	    me.getComponent('shell').setDisabled(true);
+	}
+
+	if (me.pveSelNode.data.running) {
+	    me.getComponent('wakeonlan').setDisabled(true);
 	}
     }
 });
@@ -3224,13 +3397,16 @@ Ext.define('PVE.noVncConsole', {
 
     vmid: undefined,
 
-    consoleType: undefined, // lxc or kvm
+    cmd: undefined,
+
+    consoleType: undefined, // lxc, kvm, shell, cmd
 
     layout: 'fit',
 
     xtermjs: false,
 
     border: false,
+
 
     initComponent : function() {
 	var me = this;
@@ -3243,7 +3419,7 @@ Ext.define('PVE.noVncConsole', {
 	    throw "no console type specified";
 	}
 
-	if (!me.vmid && me.consoleType !== 'shell') {
+	if (!me.vmid && me.consoleType !== 'shell' && me.consoleType !== 'cmd') {
 	    throw "no VM ID specified";
 	}
 
@@ -3252,15 +3428,20 @@ Ext.define('PVE.noVncConsole', {
 	var box = Ext.create('Ext.ux.IFrame', { itemid : "vncconsole" });
 
 	var type = me.xtermjs ? 'xtermjs' : 'novnc';
-
 	Ext.apply(me, {
 	    items: box,
 	    listeners: {
 		activate: function() {
-		    var url = '/?console=' + me.consoleType + '&' + type + '=1&node=' + me.nodename + '&resize=scale';
-		    if (me.vmid) {
-			url += '&vmid='+ me.vmid;
-		    }
+		    var queryDict = {
+			console: me.consoleType, // kvm, lxc, upgrade or shell
+			vmid: me.vmid,
+			node: me.nodename,
+			cmd: me.cmd,
+			resize: 'scale'
+		    };
+		    queryDict[type] = 1;
+		    PVE.Utils.cleanEmptyObjectKeys(queryDict);
+		    var url = '/?' + Ext.Object.toQueryString(queryDict);
 		    box.load(url);
 		}
 	    }
@@ -5095,6 +5276,21 @@ Ext.define('PVE.form.DiskStorageSelector', {
 	hdfilesel.setNodename(nodename);
     },
 
+    setDisabled: function(value) {
+	var me = this;
+	var hdstorage = me.getComponent('hdstorage');
+
+	// reset on disable
+	if (value) {
+	    hdstorage.setValue();
+	}
+	hdstorage.setDisabled(value);
+
+	// disabling does not always fire this event and we do not need
+	// the value of the validity
+	hdstorage.fireEvent('validitychange');
+    },
+
     initComponent: function() {
 	var me = this;
 
@@ -5107,6 +5303,7 @@ Ext.define('PVE.form.DiskStorageSelector', {
 		fieldLabel: me.storageLabel,
 		nodename: me.nodename,
 		storageContent: me.storageContent,
+		disabled: me.disabled,
 		autoSelect: me.autoSelect,
 		allowBlank: me.allowBlank,
 		emptyText: me.emptyText,
@@ -5154,6 +5351,9 @@ Ext.define('PVE.form.DiskStorageSelector', {
 		allowBlank: false
 	    }
 	];
+
+	// use it to disable the children but not ourself
+	me.disabled = false;
 
 	me.callParent();
     }
@@ -5765,7 +5965,7 @@ Ext.define('PVE.form.ContentTypeSelector', {
 	me.comboItems = [];
 
 	if (me.cts === undefined) {
-	    me.cts = ['images', 'iso', 'vztmpl', 'backup', 'rootdir'];
+	    me.cts = ['images', 'iso', 'vztmpl', 'backup', 'rootdir', 'snippets'];
 	}
 
 	Ext.Array.each(me.cts, function(ct) {
@@ -5995,6 +6195,9 @@ Ext.define('PVE.form.GlobalSearchField', {
 
 	hideMe: function() {
 	    var me = this;
+	    if (typeof me.ctxMenu !== 'undefined' && me.ctxMenu.isVisible()) {
+		return;
+	    }
 	    me.hasFocus = false;
 	    if (!me.textfield.hasFocus) {
 		me.hide();
@@ -6010,6 +6213,10 @@ Ext.define('PVE.form.GlobalSearchField', {
 	    rowclick: function(grid, record) {
 		var me = this;
 		me.textfield.selectAndHide(record.id);
+	    },
+	    itemcontextmenu: function(v, record, item, index, event) {
+		var me = this;
+		me.ctxMenu = PVE.Utils.createCmdMenu(v, record, item, index, event);
 	    },
 	    /* because of lint */
 	    focusleave: {
@@ -7727,6 +7934,7 @@ Ext.define('PVE.widget.HealthWidget', {
     }
 
 });
+/*global u2f*/
 Ext.define('PVE.window.LoginWindow', {
     extend: 'Ext.window.Window',
 
@@ -7742,39 +7950,130 @@ Ext.define('PVE.window.LoginWindow', {
 	    var saveunField = this.lookupReference('saveunField');
 	    var view = this.getView();
 
-	    if(form.isValid()){
-		view.el.mask(gettext('Please wait...'), 'x-mask-loading');
-
-		// set or clear username
-		var sp = Ext.state.Manager.getProvider();
-		if (saveunField.getValue() === true) {
-		    sp.set(unField.getStateId(), unField.getValue());
-		} else {
-		    sp.clear(unField.getStateId());
-		}
-		sp.set(saveunField.getStateId(), saveunField.getValue());
-
-		form.submit({
-		    failure: function(f, resp){
-			view.el.unmask();
-			var handler = function() {
-			    var uf = me.lookupReference('usernameField');
-			    uf.focus(true, true);
-			};
-
-			Ext.MessageBox.alert(gettext('Error'),
-					     gettext("Login failed. Please try again"),
-					     handler);
-		    },
-		    success: function(f, resp){
-			view.el.unmask();
-
-			var handler = view.handler || Ext.emptyFn;
-			handler.call(me, resp.result.data);
-			view.close();
-		    }
-		});
+	    if (!form.isValid()) {
+		return;
 	    }
+
+	    view.el.mask(gettext('Please wait...'), 'x-mask-loading');
+
+	    // set or clear username
+	    var sp = Ext.state.Manager.getProvider();
+	    if (saveunField.getValue() === true) {
+		sp.set(unField.getStateId(), unField.getValue());
+	    } else {
+		sp.clear(unField.getStateId());
+	    }
+	    sp.set(saveunField.getStateId(), saveunField.getValue());
+
+	    form.submit({
+		failure: function(f, resp){
+		    me.failure(resp);
+		},
+		success: function(f, resp){
+		    view.el.unmask();
+
+		    var data = resp.result.data;
+		    if (Ext.isDefined(data.NeedTFA)) {
+			// Store first factor login information first:
+			data.LoggedOut = true;
+			Proxmox.Utils.setAuthData(data);
+
+			if (Ext.isDefined(data.U2FChallenge)) {
+			    me.perform_u2f(data);
+			} else {
+			    me.perform_otp();
+			}
+		    } else {
+			me.success(data);
+		    }
+		}
+	    });
+
+	},
+	failure: function(resp) {
+	    var me = this;
+	    var view = me.getView();
+	    view.el.unmask();
+	    var handler = function() {
+		var uf = me.lookupReference('usernameField');
+		uf.focus(true, true);
+	    };
+
+	    Ext.MessageBox.alert(gettext('Error'),
+				 gettext("Login failed. Please try again"),
+				 handler);
+	},
+	success: function(data) {
+	    var me = this;
+	    var view = me.getView();
+	    var handler = view.handler || Ext.emptyFn;
+	    handler.call(me, data);
+	    view.close();
+	},
+
+	perform_otp: function() {
+	    var me = this;
+	    var win = Ext.create('PVE.window.TFALoginWindow', {
+		onLogin: function(value) {
+		    me.finish_tfa(value);
+		},
+		onCancel: function() {
+		    Proxmox.LoggedOut = false;
+		    Proxmox.Utils.authClear();
+		    me.getView().show();
+		}
+	    });
+	    win.show();
+	},
+
+	perform_u2f: function(data) {
+	    var me = this;
+	    // Show the message:
+	    var msg = Ext.Msg.show({
+		title: 'U2F: '+gettext('Verification'),
+		message: gettext('Please press the button on your U2F Device'),
+		buttons: []
+	    });
+	    var chlg = data.U2FChallenge;
+	    var key = {
+		version: chlg.version,
+		keyHandle: chlg.keyHandle
+	    };
+	    u2f.sign(chlg.appId, chlg.challenge, [key], function(res) {
+		msg.close();
+		if (res.errorCode) {
+		    Proxmox.Utils.authClear();
+		    Ext.Msg.alert(gettext('Error'), PVE.Utils.render_u2f_error(res.errorCode));
+		    return;
+		}
+		delete res.errorCode;
+		me.finish_tfa(JSON.stringify(res));
+	    });
+	},
+	finish_tfa: function(res) {
+	    var me = this;
+	    var view = me.getView();
+	    view.el.mask(gettext('Please wait...'), 'x-mask-loading');
+	    var params = { response: res };
+	    Proxmox.Utils.API2Request({
+		url: '/api2/extjs/access/tfa',
+		params: params,
+		method: 'POST',
+		timeout: 5000, // it'll delay both success & failure
+		success: function(resp, opts) {
+		    view.el.unmask();
+		    // Fill in what we copy over from the 1st factor:
+		    var data = resp.result.data;
+		    data.CSRFPreventionToken = Proxmox.CSRFPreventionToken;
+		    data.username = Proxmox.UserName;
+		    // Finish logging in:
+		    me.success(data);
+		},
+		failure: function(resp, opts) {
+		    Proxmox.Utils.authClear();
+		    me.failure(resp);
+		}
+	    });
 	},
 
 	control: {
@@ -7785,18 +8084,6 @@ Ext.define('PVE.window.LoginWindow', {
 			if (!pf.getValue()) {
 			    pf.focus(false);
 			}
-		    }
-		}
-	    },
-	    'field[name=realm]': {
-		change: function(f, value) {
-		    var otp_field = this.lookupReference('otpField');
-		    if (f.needOTP(value)) {
-			otp_field.setVisible(true);
-			otp_field.setDisabled(false);
-		    } else {
-			otp_field.setVisible(false);
-			otp_field.setDisabled(true);
 		    }
 		}
 	    },
@@ -7879,14 +8166,6 @@ Ext.define('PVE.window.LoginWindow', {
 		reference: 'passwordField'
 	    },
 	    {
-		xtype: 'textfield',
-		fieldLabel: gettext('OTP'),
-		name: 'otp',
-		reference: 'otpField',
-		allowBlank: false,
-		hidden: true
-	    },
-	    {
 		xtype: 'pveRealmComboBox',
 		name: 'realm'
 	    },
@@ -7917,6 +8196,55 @@ Ext.define('PVE.window.LoginWindow', {
 	]
     }]
  });
+Ext.define('PVE.window.TFALoginWindow', {
+    extend: 'Ext.window.Window',
+
+    modal: true,
+    resizable: false,
+    title: 'Two-Factor Authentication',
+    layout: 'form',
+    defaultButton: 'loginButton',
+    defaultFocus: 'otpField',
+
+    controller: {
+	xclass: 'Ext.app.ViewController',
+	login: function() {
+	    var me = this;
+	    var view = me.getView();
+	    view.onLogin(me.lookup('otpField').getValue());
+	    view.close();
+	},
+	cancel: function() {
+	    var me = this;
+	    var view = me.getView();
+	    view.onCancel();
+	    view.close();
+	}
+    },
+
+    items: [
+	{
+	    xtype: 'textfield',
+	    fieldLabel: gettext('Please enter your OTP verification code:'),
+	    name: 'otp',
+	    itemId: 'otpField',
+	    reference: 'otpField',
+	    allowBlank: false
+	}
+    ],
+
+    buttons: [
+	{
+	    text: gettext('Login'),
+	    reference: 'loginButton',
+	    handler: 'login'
+	},
+	{
+	    text: gettext('Cancel'),
+	    handler: 'cancel'
+	}
+    ]
+});
 Ext.define('PVE.window.Wizard', {
     extend: 'Ext.window.Window',
 
@@ -8384,7 +8712,7 @@ Ext.define('PVE.window.Restore', {
 	    IDfield = Ext.create('PVE.form.GuestIDSelector', {
 		name: 'vmid',
 		guestType: me.vmtype,
-		loadNextGuestID: true,
+		loadNextFreeID: true,
 		validateExists: false
 	    });
 	}
@@ -8407,17 +8735,30 @@ Ext.define('PVE.window.Restore', {
 		    tag: 'div',
 		    'data-qtip': gettext("Use '0' to disable all bandwidth limits.")
 		}
+	    },
+	    {
+		xtype: 'proxmoxcheckbox',
+		name: 'unique',
+		fieldLabel: gettext('Unique'),
+		hidden: !!me.vmid,
+		autoEl: {
+		    tag: 'div',
+		    'data-qtip': gettext('Autogenerate unique properties, e.g., MAC addresses')
+		},
+		checked: false
 	    }
 	];
 
+	/*jslint confusion: true*/
 	if (me.vmtype === 'lxc') {
 	    items.push({
 		xtype: 'proxmoxcheckbox',
 		name: 'unprivileged',
-		value: '',
+		value: true,
 		fieldLabel: gettext('Unprivileged container')
 	    });
 	}
+	/*jslint confusion: false*/
 
 	me.formPanel = Ext.create('Ext.form.Panel', {
 	    bodyPadding: 10,
@@ -8463,6 +8804,7 @@ Ext.define('PVE.window.Restore', {
 		    vmid: me.vmid || values.vmid,
 		    force: me.vmid ? 1 : 0
 		};
+		if (values.unique) { params.unique = 1; }
 
 		if (values.bwlimit !== undefined) {
 		    params.bwlimit = values.bwlimit * 1024;
@@ -9160,6 +9502,234 @@ Ext.define('PVE.window.StartupEdit', {
 	});
     }
 });
+/*jslint confusion: true*/
+Ext.define('PVE.ceph.Install', {
+    extend: 'Ext.window.Window',
+    xtype: 'pveCephInstallWindow',
+    mixins: ['Proxmox.Mixin.CBind'],
+
+    width: 220,
+    header: false,
+    resizable: false,
+    draggable: false,
+    modal: true,
+    nodename: undefined,
+    shadow: false,
+    border: false,
+    bodyBorder: false,
+    closable: false,
+    cls: 'install-mask',
+    bodyCls: 'install-mask',
+    layout: {
+        align: 'stretch',
+        pack: 'center',
+	type: 'vbox'
+    },
+    viewModel: {
+	data: {
+	      cephVersion: 'luminous',
+	      isInstalled: false
+	},
+	formulas: {
+	    buttonText: function (get){
+		if (get('isInstalled')) {
+		    return gettext('Configure Ceph');
+		} else {
+		    return gettext('Install Ceph-') + get('cephVersion');
+		}
+	    },
+	    windowText: function (get) {
+		if (get('isInstalled')) {
+		    return '<p class="install-mask">' +
+		    Ext.String.format(gettext('{0} is not initialized.'), 'Ceph') + ' '+
+		    gettext('You need to create a initial config once.') + '</p>';
+		} else {
+		    return '<p class="install-mask">' +
+		    Ext.String.format(gettext('{0} is not installed on this node.'), 'Ceph') + '<br>' +
+		    gettext('Would you like to install it now?') + '</p>';
+		}
+	    }
+	}
+    },
+    items: [
+	{
+	    bind: {
+		html: '{windowText}'
+	    },
+	    border: false,
+	    padding: 5,
+	    bodyCls: 'install-mask'
+
+	},
+	{
+	    xtype: 'button',
+	    bind: {
+		text: '{buttonText}'
+	    },
+	    viewModel: {},
+	    cbind: {
+		nodename: '{nodename}'
+	    },
+	    handler: function() {
+		var me = this.up('pveCephInstallWindow');
+		var win = Ext.create('PVE.ceph.CephInstallWizard',{
+		    nodename: me.nodename
+		});
+		win.getViewModel().set('isInstalled', this.getViewModel().get('isInstalled'));
+		win.show();
+		me.mon(win,'beforeClose', function(){
+		    me.fireEvent("cephInstallWindowClosed");
+		    me.close();
+		});
+
+	    }
+	}
+    ]
+});
+/*jslint confusion: true*/
+Ext.define('PVE.FirewallEnableEdit', {
+    extend: 'Proxmox.window.Edit',
+    alias: ['widget.pveFirewallEnableEdit'],
+    mixins: ['Proxmox.Mixin.CBind'],
+
+    subject: gettext('Firewall'),
+    cbindData: {
+	defaultValue: 0
+    },
+    width: 350,
+
+    items: [
+	{
+	    xtype: 'proxmoxcheckbox',
+	    name: 'enable',
+	    uncheckedValue: 0,
+	    cbind: {
+		defaultValue: '{defaultValue}',
+		checked: '{defaultValue}'
+	    },
+	    deleteDefaultValue: false,
+	    fieldLabel: gettext('Firewall')
+	},
+	{
+	    xtype: 'displayfield',
+	    name: 'warning',
+	    userCls: 'pve-hint',
+	    value: gettext('Warning: Firewall still disabled at datacenter level!'),
+	    hidden: true
+	}
+    ],
+
+    beforeShow: function() {
+	var me = this;
+
+	Proxmox.Utils.API2Request({
+	    url: '/api2/extjs/cluster/firewall/options',
+	    method: 'GET',
+	    failure: function(response, opts) {
+		Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+	    },
+	    success: function(response, opts) {
+		if (!response.result.data.enable) {
+		    me.down('displayfield[name=warning]').setVisible(true);
+		}
+	    }
+	});
+    }
+});
+/*jslint confusion: true*/
+Ext.define('PVE.FirewallLograteInputPanel', {
+    extend: 'Proxmox.panel.InputPanel',
+    xtype: 'pveFirewallLograteInputPanel',
+
+    viewModel: {},
+
+    items: [
+	{
+	    xtype: 'proxmoxcheckbox',
+	    name: 'enable',
+	    reference: 'enable',
+	    fieldLabel: gettext('Enable'),
+	    value: false
+	},
+	{
+	    layout: 'hbox',
+	    border: false,
+	    items: [
+		{
+		    xtype: 'numberfield',
+		    name: 'rate',
+		    fieldLabel: gettext('Log rate limit'),
+		    minValue: 1,
+		    maxValue: 99,
+		    allowBlank: false,
+		    flex: 2,
+		    value: 1
+		},
+		{
+		    html: '<div style="margin: auto; padding: 2.5px;"><b>/</b></div>'
+		},
+		{
+		    xtype: 'proxmoxKVComboBox',
+		    name: 'unit',
+		    comboItems: [['second', 'second'], ['minute', 'minute'],
+			['hour', 'hour'], ['day', 'day']],
+		    allowBlank: false,
+		    flex: 1,
+		    value: 'second'
+		}
+	    ]
+	},
+	{
+	    xtype: 'numberfield',
+	    name: 'burst',
+	    fieldLabel: gettext('Log burst limit'),
+	    minValue: 1,
+	    maxValue: 99,
+	    value: 5
+	}
+    ],
+
+    onGetValues: function(values) {
+	var me = this;
+
+	var vals = {};
+	vals.enable = values.enable !== undefined ? 1 : 0;
+	vals.rate = values.rate + '/' + values.unit;
+	vals.burst = values.burst;
+	var properties = PVE.Parser.printPropertyString(vals, undefined);
+	if (properties == '') {
+	    return { 'delete': 'log_ratelimit' };
+	}
+	return { log_ratelimit: properties };
+    },
+
+    setValues: function(values) {
+	var me = this;
+
+	var properties = {};
+	if (values.log_ratelimit !== undefined) {
+	    properties = PVE.Parser.parsePropertyString(values.log_ratelimit);
+	    var matches = properties.rate.match(/^(\d+)\/(second|minute|hour|day)$/);
+	    if (matches) {
+		properties.rate = matches[1];
+		properties.unit = matches[2];
+	    }
+	}
+	me.callParent([properties]);
+    }
+});
+
+Ext.define('PVE.FirewallLograteEdit', {
+    extend: 'Proxmox.window.Edit',
+    xtype: 'pveFirewallLograteEdit',
+
+    subject: gettext('Log rate limit'),
+
+    items: [{
+	xtype: 'pveFirewallLograteInputPanel'
+    }],
+    autoLoad: true
+});
 Ext.define('PVE.panel.NotesView', {
     extend: 'Ext.panel.Panel',
     xtype: 'pveNotesView',
@@ -9760,7 +10330,7 @@ Ext.define('PVE.FirewallRulePanel', {
 	// hack: editable ComboGrid returns nothing when empty, so we need to set ''
 	// Also, disabled text fields return nothing, so we need to set ''
 
-	Ext.Array.each(['source', 'dest', 'macro', 'proto', 'sport', 'dport'], function(key) {
+	Ext.Array.each(['source', 'dest', 'macro', 'proto', 'sport', 'dport', 'log'], function(key) {
 	    if (values[key] === undefined) {
 		values[key] = '';
 	    }
@@ -9908,7 +10478,13 @@ Ext.define('PVE.FirewallRulePanel', {
 		fieldLabel: gettext('Dest. port')
 	    }
 	];
-	
+
+	me.advancedColumn1 = [
+	    {
+		xtype: 'pveFirewallLogLevels'
+	    }
+	];
+
 	me.columnB = [
 	    {
 		xtype: 'textfield',
@@ -10437,6 +11013,14 @@ Ext.define('PVE.FirewallRules', {
 		width: 100
 	    },
 	    {
+		header: gettext('Log level'),
+		dataIndex: 'log',
+		renderer: function(value, metaData, record) {
+		    return render_errors('log', value, metaData, record);
+		},
+		width: 100
+	    },
+	    {
 		header: gettext('Comment'),
 		dataIndex: 'comment',
 		flex: 1,
@@ -10729,20 +11313,25 @@ Ext.define('PVE.FirewallOptions', {
 		    subject: name,
 		    fieldDefaults: { labelWidth: labelWidth || 100 },
 		    items: {
-			xtype: 'proxmoxKVComboBox',
+			xtype: 'pveFirewallLogLevels',
 			name: name,
-			fieldLabel: name,
-			comboItems: [['nolog', 'nolog'], ['info', 'info'], ['err', 'err'],
-			       ['warning', 'warning'], ['crit', 'crit'], ['alert', 'alert'],
-			       ['emerg', 'emerg'], ['debug', 'debug']]
+			fieldLabel: name
 		    }
 		}
 	    };
 	};
 
-
 	if (me.fwtype === 'node') {
-	    add_boolean_row('enable', gettext('Firewall'), 1);
+	    me.rows.enable = {
+		required: true,
+		defaultValue: 1,
+		header: gettext('Firewall'),
+		renderer: Proxmox.Utils.format_boolean,
+		editor: {
+		    xtype: 'pveFirewallEnableEdit',
+		    defaultValue: 1
+		}
+	    };
 	    add_boolean_row('nosmurfs', gettext('SMURFS filter'), 1);
 	    add_boolean_row('tcpflags', gettext('TCP flags filter'), 0);
 	    add_boolean_row('ndp', 'NDP', 1);
@@ -10754,7 +11343,16 @@ Ext.define('PVE.FirewallOptions', {
 	    add_log_row('tcp_flags_log_level', 120);
 	    add_log_row('smurf_log_level');
 	} else if (me.fwtype === 'vm') {
-	    add_boolean_row('enable', gettext('Firewall'), 0);
+	    me.rows.enable = {
+		required: true,
+		defaultValue: 0,
+		header: gettext('Firewall'),
+		renderer: Proxmox.Utils.format_boolean,
+		editor: {
+		    xtype: 'pveFirewallEnableEdit',
+		    defaultValue: 0
+		}
+	    };
 	    add_boolean_row('dhcp', 'DHCP', 1);
 	    add_boolean_row('ndp', 'NDP', 1);
 	    add_boolean_row('radv', gettext('Router Advertisement'), 0);
@@ -10765,6 +11363,14 @@ Ext.define('PVE.FirewallOptions', {
 	} else if (me.fwtype === 'dc') {
 	    add_boolean_row('enable', gettext('Firewall'), 0);
 	    add_boolean_row('ebtables', 'ebtables', 1);
+	    me.rows.log_ratelimit = {
+		header: gettext('Log rate limit'),
+		required: true,
+		defaultValue: 'enable=0',
+		editor: {
+		    xtype: 'pveFirewallLograteEdit'
+		}
+	    };
 	}
 
 	if (me.fwtype === 'dc' || me.fwtype === 'vm') {
@@ -10837,6 +11443,19 @@ Ext.define('PVE.FirewallOptions', {
 	me.on('destroy', me.rstore.stopUpdate);
 	me.on('deactivate', me.rstore.stopUpdate);
     }
+});
+
+
+Ext.define('PVE.FirewallLogLevels', {
+    extend: 'Proxmox.form.KVComboBox',
+    alias: ['widget.pveFirewallLogLevels'],
+
+    name: 'log',
+    fieldLabel: gettext('Log level'),
+    value: 'nolog',
+    comboItems: [['nolog', 'nolog'], ['emerg', 'emerg'], ['alert', 'alert'],
+	['crit', 'crit'], ['err', 'err'], ['warning', 'warning'],
+	['notice', 'notice'], ['info', 'info'], ['debug', 'debug']]
 });
 /*
  * Left Treepanel, containing all the ressources we manage in this datacenter: server nodes, server storages, VMs and Containers
@@ -10971,12 +11590,26 @@ Ext.define('PVE.tree.ResourceTree', {
 	info.text = status + info.text;
     },
 
+    setToolTip: function(info) {
+	if (info.type === 'pool' || info.groupbyid !== undefined) {
+	    return;
+	}
+
+	var qtips = [gettext('Status') + ': ' + (info.qmpstatus || info.status)];
+	if (info.hastate != 'unmanaged') {
+	    qtips.push(gettext('HA State') + ": " + info.hastate);
+	}
+
+	info.qtip = qtips.join(', ');
+    },
+
     // private
     addChildSorted: function(node, info) {
 	var me = this;
 
 	me.setIconCls(info);
 	me.setText(info);
+	me.setToolTip(info);
 
 	var defaults;
 	if (info.groupbyid) {
@@ -11141,6 +11774,7 @@ Ext.define('PVE.tree.ResourceTree', {
 			Ext.apply(info, item.data);
 			me.setIconCls(info);
 			me.setText(info);
+			me.setToolTip(info);
 			olditem.commit();
 		    }
 		    if ((!item || moved) && olditem.isLeaf()) {
@@ -11822,6 +12456,8 @@ Ext.define('PVE.panel.Config', {
     showSearch: true, // add a ressource grid with a search button as first tab
     viewFilter: undefined, // a filter to pass to that ressource grid
 
+    tbarSpacing: true, // if true, adds a spacer after the title in tbar
+
     dockedItems: [{
 	// this is needed for the overflow handler
 	xtype: 'toolbar',
@@ -11959,7 +12595,9 @@ Ext.define('PVE.panel.Config', {
 	    }
 	}
 
-	tbar.unshift('->');
+	if (me.tbarSpacing) {
+	    tbar.unshift('->');
+	}
 	tbar.unshift({
 	    xtype: 'tbtext',
 	    text: title,
@@ -12467,6 +13105,10 @@ Ext.define('PVE.NodeCephFSPanel', {
 			interval: 5 * 1000,
 			autoStart: true,
 			storeid: 'pve-ceph-fs',
+			proxy: {
+			    type: 'proxmox',
+			    url: '/api2/json/nodes/' + view.nodename + '/ceph/fs'
+			},
 			model: 'pve-ceph-fs'
 		    });
 		    view.setStore(Ext.create('Proxmox.data.DiffStore', {
@@ -12476,7 +13118,17 @@ Ext.define('PVE.NodeCephFSPanel', {
 			    order: 'DESC'
 			}
 		    }));
-		    Proxmox.Utils.monStoreErrors(view, view.rstore);
+		    var regex = new RegExp("not (installed|initialized)", "i");
+		    PVE.Utils.handleStoreErrorOrMask(view, view.rstore, regex, function(me, error){
+			me.rstore.stopUpdate();
+			PVE.Utils.showCephInstallOrMask(me.ownerCt, error.statusText, view.nodename,
+			    function(win){
+				me.mon(win, 'cephInstallWindowClosed', function(){
+				    me.rstore.startUpdate();
+				});
+			    }
+			);
+		    });
 		    view.rstore.on('load', this.onLoad, this);
 		    view.on('destroy', view.rstore.stopUpdate);
 		},
@@ -12550,6 +13202,10 @@ Ext.define('PVE.NodeCephFSPanel', {
 			interval: 3 * 1000,
 			autoStart: true,
 			storeid: 'pve-ceph-mds',
+			proxy: {
+			    type: 'proxmox',
+			    url: '/api2/json/nodes/'+ view.nodename +'/ceph/mds'
+			},
 			model: 'pve-ceph-mds'
 		    });
 		    view.setStore(Ext.create('Proxmox.data.DiffStore', {
@@ -12559,7 +13215,17 @@ Ext.define('PVE.NodeCephFSPanel', {
 			    order: 'DESC'
 			}
 		    }));
-		    Proxmox.Utils.monStoreErrors(view, view.rstore);
+		    var regex = new RegExp("not (installed|initialized)", "i");
+		    PVE.Utils.handleStoreErrorOrMask(view, view.rstore, regex, function(me, error){
+			me.rstore.stopUpdate();
+			PVE.Utils.showCephInstallOrMask(me.ownerCt, error.statusText, view.nodename,
+			    function(win){
+				me.mon(win, 'cephInstallWindowClosed', function(){
+				    me.rstore.startUpdate();
+				});
+			    }
+			);
+		    });
 		    view.rstore.on('load', this.onLoad, this);
 		    view.on('destroy', view.rstore.stopUpdate);
 		},
@@ -12825,7 +13491,17 @@ Ext.define('PVE.node.CephPoolList', {
 
 	var store = Ext.create('Proxmox.data.DiffStore', { rstore: rstore });
 
-	Proxmox.Utils.monStoreErrors(me, rstore);
+	var regex = new RegExp("not (installed|initialized)", "i");
+	PVE.Utils.handleStoreErrorOrMask(me, rstore, regex, function(me, error){
+	    me.store.rstore.stopUpdate();
+	    PVE.Utils.showCephInstallOrMask(me, error.statusText, nodename,
+		function(win){
+		    me.mon(win, 'cephInstallWindowClosed', function(){
+			me.store.rstore.startUpdate();
+		    });
+		}
+	    );
+	});
 
 	var create_btn = new Ext.Button({
 	    text: gettext('Create'),
@@ -13222,7 +13898,14 @@ Ext.define('PVE.node.CephOsdTree', {
 		waitMsgTarget: me,
 		method: 'GET',
 		failure: function(response, opts) {
-		    Proxmox.Utils.setErrorMask(me, response.htmlStatus);
+		    var msg = response.htmlStatus;
+		    PVE.Utils.showCephInstallOrMask(me, msg, me.pveSelNode.data.node,
+			function(win){
+			    me.mon(win, 'cephInstallWindowClosed', function(){
+				reload();
+			    });
+			}
+		    );
 		},
 		success: function(response, opts) {
 		    sm.deselectAll();
@@ -13534,7 +14217,6 @@ Ext.define('PVE.node.CephMonList', {
 	    sorters: [{ property: 'name'}]
 	});
 
-	Proxmox.Utils.monStoreErrors(me, rstore);
 
 	var service_cmd = function(cmd) {
 	    var rec = sm.getSelection()[0];
@@ -13663,6 +14345,18 @@ Ext.define('PVE.node.CephMonList', {
 	    }
 	});
 
+	var regex = new RegExp("not (installed|initialized)", "i");
+	PVE.Utils.handleStoreErrorOrMask(me, rstore, regex, function(me, error){
+	    me.store.rstore.stopUpdate();
+	    PVE.Utils.showCephInstallOrMask(me, error.statusText, nodename,
+		function(win){
+		    me.mon(win, 'cephInstallWindowClosed', function(){
+			me.store.rstore.startUpdate();
+		    });
+		}
+	    );
+	});
+
 	me.callParent();
     }
 }, function() {
@@ -13690,6 +14384,14 @@ Ext.define('PVE.node.CephCrushMap', {
 	    waitMsgTarget: me,
 	    failure: function(response, opts) {
 		me.update(gettext('Error') + " " + response.htmlStatus);
+		var msg = response.htmlStatus;
+		PVE.Utils.showCephInstallOrMask(me.ownerCt, msg, me.pveSelNode.data.node,
+		    function(win){
+			me.mon(win, 'cephInstallWindowClosed', function(){
+			    me.load();
+			});
+		    }
+		);
 	    },
 	    success: function(response, opts) {
 		var data = response.result.data;
@@ -14031,7 +14733,18 @@ Ext.define('PVE.node.CephStatus', {
 	me.version = me.sp.get('ceph-version');
 	me.change_version(me.version);
 
-	Proxmox.Utils.monStoreErrors(me,me.store);
+	var regex = new RegExp("not (installed|initialized)", "i");
+	PVE.Utils.handleStoreErrorOrMask(me, me.store, regex, function(me, error){
+	    me.store.stopUpdate();
+	    PVE.Utils.showCephInstallOrMask(me, error.statusText, nodename,
+		function(win){
+		    me.mon(win, 'cephInstallWindowClosed', function(){
+			me.store.startUpdate();
+		    });
+		}
+	    );
+	});
+
 	me.mon(me.store, 'load', me.updateAll, me);
 	me.on('destroy', me.store.stopUpdate);
 	me.store.startUpdate();
@@ -14321,6 +15034,15 @@ Ext.define('PVE.node.CephConfig', {
 	    waitMsgTarget: me,
 	    failure: function(response, opts) {
 		me.update(gettext('Error') + " " + response.htmlStatus);
+		var msg = response.htmlStatus;
+		PVE.Utils.showCephInstallOrMask(me.ownerCt, msg, me.pveSelNode.data.node,
+		    function(win){
+			me.mon(win, 'cephInstallWindowClosed', function(){
+			    me.load();
+			});
+		    }
+		);
+
 	    },
 	    success: function(response, opts) {
 		var data = response.result.data;
@@ -14380,6 +15102,373 @@ Ext.define('PVE.node.CephConfigCrush', {
 	me.callParent();
     }
 });
+Ext.define('PVE.ceph.Log', {
+    extend: 'Proxmox.panel.LogView',
+    xtype: 'cephLogView',
+    nodename: undefined,
+    failCallback: function(response) {
+	var me = this;
+	var msg = response.htmlStatus;
+	var windowShow = PVE.Utils.showCephInstallOrMask(me, msg, me.nodename,
+	    function(win){
+		me.mon(win, 'cephInstallWindowClosed', function(){
+		    me.loadTask.delay(200);
+		});
+	    }
+	);
+	if (!windowShow) {
+	    Proxmox.Utils.setErrorMask(me, msg);
+	}
+    }
+});
+/*jslint confusion: true*/
+Ext.define('PVE.ceph.CephInstallWizard', {
+	extend: 'PVE.window.Wizard',
+	alias: 'widget.pveCephInstallWizard',
+	mixins: ['Proxmox.Mixin.CBind'],
+	resizable: false,
+	nodename: undefined,
+	viewModel: {
+	    data: {
+		nodename: '',
+		configuration: true,
+		isInstalled: false
+	    }
+	},
+	cbindData: {
+	    nodename: undefined
+	},
+	title: gettext('Setup'),
+	navigateNext: function() {
+	    var tp = this.down('#wizcontent');
+	    var atab = tp.getActiveTab();
+
+	    var next = tp.items.indexOf(atab) + 1;
+	    var ntab = tp.items.getAt(next);
+	    if (ntab) {
+		ntab.enable();
+		tp.setActiveTab(ntab);
+	    }
+	},
+	setInitialTab: function (index) {
+	    var tp = this.down('#wizcontent');
+	    var initialTab = tp.items.getAt(index);
+	    initialTab.enable();
+	    tp.setActiveTab(initialTab);
+	},
+	onShow: function() {
+		this.callParent(arguments);
+		var isInstalled = this.getViewModel().get('isInstalled');
+		if (isInstalled) {
+		    this.getViewModel().set('configuration', false);
+		    this.setInitialTab(2);
+		}
+	},
+	items: [
+	    {
+		title: gettext('Info'),
+		xtype: 'panel',
+		border: false,
+		bodyBorder: false,
+		onlineHelp: 'chapter_pveceph',
+		html: '<h3>Ceph?</h3>'+
+		'<blockquote cite="https://ceph.com/"><p>"<b>Ceph</b> is a unified, distributed storage system designed for excellent performance, reliability and scalability."</p></blockquote>'+
+		'<p><b>Ceph</b> is currently <b>not installed</b> on this node, click on the next button below to start the installation.'+
+		' This wizard will guide you through the necessary steps, after the initial installation you will be offered to create a initial configuration.'+
+		' The configuration step is only needed once per cluster and will be skipped if a config is already present.</p>'+
+		'<p>Please take a look at our documentation, by clicking the help button below, before starting the installation, '+
+		'if you want to gain deeper knowledge about Ceph visit <a target="_blank" href="http://docs.ceph.com/docs/master/">ceph.com</a>.</p>',
+		listeners: {
+		    activate: function() {
+			// notify owning container that it should display a help button
+			if (this.onlineHelp) {
+			    Ext.GlobalEvents.fireEvent('proxmoxShowHelp', this.onlineHelp);
+			}
+			this.up('pveCephInstallWizard').down('#back').hide(true);
+			this.up('pveCephInstallWizard').down('#next').setText(gettext('Start installation'));
+		    },
+		    deactivate: function() {
+			if (this.onlineHelp) {
+			    Ext.GlobalEvents.fireEvent('proxmoxHideHelp', this.onlineHelp);
+			}
+			this.up('pveCephInstallWizard').down('#next').setText(gettext('Next'));
+		    }
+		}
+	    },
+	    {
+		title: gettext('Installation'),
+		xtype: 'panel',
+		layout: 'fit',
+		cbind:{
+		    nodename: '{nodename}'
+		},
+		viewModel: {}, // needed to inherit parent viewModel data
+		listeners: {
+		    afterrender: function() {
+			var me = this;
+			if (this.getViewModel().get('isInstalled')) {
+			    this.mask("Ceph is already installed, click next to create your configuration.",['pve-static-mask']);
+			} else {
+			    me.down('pveNoVncConsole').fireEvent('activate');
+			}
+		    },
+		    activate: function() {
+			var me = this;
+			var nodename = me.nodename;
+			me.updateStore = Ext.create('Proxmox.data.UpdateStore', {
+				storeid: 'ceph-status-' + nodename,
+				interval: 1000,
+				proxy: {
+				    type: 'proxmox',
+				    url: '/api2/json/nodes/' + nodename + '/ceph/status'
+				},
+				listeners: {
+				    load: function(rec, response, success, operation) {
+
+					if (success) {
+					    me.updateStore.stopUpdate();
+					    me.down('textfield').setValue('success');
+					} else if (operation.error.statusText.match("not initialized", "i")) {
+					    me.updateStore.stopUpdate();
+					    me.up('pveCephInstallWizard').getViewModel().set('configuration',false);
+					    me.down('textfield').setValue('success');
+					} else if (operation.error.statusText.match("rados_connect failed", "i")) {
+					    me.updateStore.stopUpdate();
+					    me.up('pveCephInstallWizard').getViewModel().set('configuration',true);
+					    me.down('textfield').setValue('success');
+					} else if (!operation.error.statusText.match("not installed", "i")) {
+					    Proxmox.Utils.setErrorMask(me, operation.error.statusText);
+					}
+				    }
+				}
+			});
+			me.updateStore.startUpdate();
+		    },
+		    destroy: function() {
+			var me = this;
+			if (me.updateStore) {
+			    me.updateStore.stopUpdate();
+			}
+		    }
+		},
+		items: [
+		    {
+			itemId: 'jsconsole',
+			consoleType: 'cmd',
+			xtermjs: true,
+			xtype: 'pveNoVncConsole',
+			cbind:{
+			    nodename: '{nodename}'
+			},
+			cmd: 'ceph_install'
+		    },
+		    {
+			xtype: 'textfield',
+			name: 'installSuccess',
+			value: '',
+			allowBlank: false,
+			submitValue: false,
+			hidden: true
+		    }
+		]
+	    },
+	    {
+		xtype: 'inputpanel',
+		title: gettext('Configuration'),
+		onlineHelp: 'chapter_pveceph',
+		cbind: {
+		    nodename: '{nodename}'
+		},
+		viewModel: {
+		    data: {
+			replicas: undefined,
+			minreplicas: undefined
+		    }
+		},
+		listeners: {
+		    activate: function() {
+			this.up('pveCephInstallWizard').down('#submit').setText(gettext('Next'));
+		    },
+		    beforeshow: function() {
+			if (this.up('pveCephInstallWizard').getViewModel().get('configuration')) {
+			    this.mask("Coniguration already initialized",['pve-static-mask']);
+			} else {
+			    this.unmask();
+			}
+		    },
+		    deactivate: function() {
+			this.up('pveCephInstallWizard').down('#submit').setText(gettext('Finish'));
+		    }
+		},
+		column1: [
+		    {
+			xtype: 'displayfield',
+			value: gettext('Ceph cluster configuration') + ':'
+		    },
+		    {
+			xtype: 'textfield',
+			name: 'network',
+			vtype: 'IP64CIDRAddress',
+			value: '',
+			fieldLabel: 'Public Network IP/CIDR',
+			bind: {
+			    allowBlank: '{configuration}'
+			},
+			setAllowBlank: function(allowBlank) {
+			    this.allowBlank = allowBlank;
+			    this.validate();
+			}
+		    },
+		    {
+			xtype: 'textfield',
+			name: 'cluster-network',
+			vtype: 'IP64CIDRAddress',
+			fieldLabel: 'Cluster Network IP/CIDR',
+			allowBlank: true,
+			emptyText: gettext('Same as Public Network')
+		    }
+		    // FIXME: add hint about cluster network and/or reference user to docs??
+		],
+		column2: [
+		    {
+			xtype: 'displayfield',
+			value: gettext('First Ceph monitor') + ':'
+		    },
+		    {
+			xtype: 'pveNodeSelector',
+			fieldLabel: gettext('Monitor node'),
+			name: 'mon-node',
+			selectCurNode: true,
+			allowBlank: false
+		    },
+		    {
+			xtype: 'displayfield',
+			value: gettext('Additional monitors are recommended. They can be created at any time in the Monitor tab.'),
+			userCls: 'pve-hint'
+		    }
+		],
+		advancedColumn1: [
+		    {
+			xtype: 'numberfield',
+			name: 'size',
+			fieldLabel: 'Number of replicas',
+			bind: {
+			    value: '{replicas}'
+			},
+			maxValue: 7,
+			minValue: 2,
+			emptyText: '3'
+		    },
+		    {
+			xtype: 'numberfield',
+			name: 'min_size',
+			fieldLabel: 'Minimum replicas',
+			bind: {
+			    maxValue: '{replicas}',
+			    value: '{minreplicas}'
+			},
+			minValue: 2,
+			maxValue: 3,
+			setMaxValue: function(value) {
+			    this.maxValue = Ext.Number.from(value, 2);
+			    // allow enough to avoid split brains with max 'size', but more makes simply no sense
+			    if (this.maxValue > 4) {
+				this.maxValue = 4;
+			    }
+			    this.toggleSpinners();
+			    this.validate();
+			},
+			emptyText: '2'
+		    }
+		],
+		onGetValues: function(values) {
+		    ['cluster-network', 'size', 'min_size'].forEach(function(field) {
+			if (!values[field]) {
+			    delete values[field];
+			}
+		    });
+		    return values;
+		},
+		onSubmit: function() {
+		    var me = this;
+		    if (!this.up('pveCephInstallWizard').getViewModel().get('configuration')) {
+			var wizard = me.up('window');
+			var kv = wizard.getValues();
+			delete kv['delete'];
+			var monNode = kv['mon-node'];
+			delete kv['mon-node'];
+			var nodename = me.nodename;
+			delete kv.nodename;
+			Proxmox.Utils.API2Request({
+			    url: '/nodes/' + nodename + '/ceph/init',
+			    waitMsgTarget: wizard,
+			    method: 'POST',
+			    params: kv,
+			    success: function() {
+				Proxmox.Utils.API2Request({
+				    url: '/nodes/' + monNode + '/ceph/mon',
+				    waitMsgTarget: wizard,
+				    method: 'POST',
+				    success: function() {
+					me.up('pveCephInstallWizard').navigateNext();
+				    },
+				    failure: function(response, opts) {
+					Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+				    }
+				});
+			    },
+			    failure: function(response, opts) {
+				Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+			    }
+			});
+
+		    } else {
+			me.up('pveCephInstallWizard').navigateNext();
+		    }
+		}
+	    },
+	    {
+		title: gettext('Success'),
+		xtype: 'panel',
+		border: false,
+		bodyBorder: false,
+		onlineHelp: 'pve_ceph_install',
+		html: '<h3>Installation successful!</h3>'+
+		'<p>The basic installation and configuration is completed, depending on your setup some of the following steps are required to start using Ceph:</p>'+
+		    '<ol><li>Install Ceph on other nodes</li>'+
+		    '<li>Create additional Ceph Monitors</li>'+
+		    '<li>Create Ceph OSDs</li>'+
+		    '<li>Create Ceph Pools</li></ol>'+
+		'<p>To learn more click on the help button below.</p>',
+		listeners: {
+		    activate: function() {
+			// notify owning container that it should display a help button
+			if (this.onlineHelp) {
+			    Ext.GlobalEvents.fireEvent('proxmoxShowHelp', this.onlineHelp);
+			}
+
+			var tp = this.up('#wizcontent');
+			var idx = tp.items.indexOf(this)-1;
+			for(;idx >= 0;idx--) {
+			    var nc = tp.items.getAt(idx);
+			    if (nc) {
+				nc.disable();
+			    }
+			}
+		    },
+		    deactivate: function() {
+			if (this.onlineHelp) {
+			    Ext.GlobalEvents.fireEvent('proxmoxHideHelp', this.onlineHelp);
+			}
+		    }
+		},
+		onSubmit: function() {
+		    var wizard = this.up('pveCephInstallWizard');
+		    wizard.close();
+		}
+	    }
+	]
+    });
 Ext.define('PVE.node.DiskList', {
     extend: 'Ext.grid.GridPanel',
     alias: 'widget.pveNodeDiskList',
@@ -17436,8 +18525,9 @@ Ext.define('PVE.node.Config', {
 		    iconCls: 'fa fa-list',
 		    groups: ['ceph'],
 		    onlineHelp: 'chapter_pveceph',
-		    xtype: 'proxmoxLogView',
-		    url: "/api2/extjs/nodes/" + nodename + "/ceph/log"
+		    xtype: 'cephLogView',
+		    url: "/api2/extjs/nodes/" + nodename + "/ceph/log",
+		    nodename: nodename
 		});
 	}
 
@@ -17703,6 +18793,8 @@ Ext.define('PVE.window.Migrate', {
 	var items = [];
 
 	if (me.action === 'migrateall') {
+	    /*jslint confusion: true*/
+	    /*value is string and number*/
 	    items.push(
 		{
 		    xtype: 'pveNodeSelector',
@@ -17720,8 +18812,16 @@ Ext.define('PVE.window.Migrate', {
 		    value: 1,
 		    fieldLabel: gettext('Parallel jobs'),
 		    allowBlank: false
+		},
+		{
+		    itemId: 'lxcwarning',
+		    xtype: 'displayfield',
+		    userCls: 'pve-hint',
+		    value: 'Warning: Running CTs will be migrated in Restart Mode.',
+		    hidden: true // only visible if running container chosen
 		}
 	    );
+	    /*jslint confusion: false*/
 	} else if (me.action === 'startall') {
 	    items.push({
 		xtype: 'hiddenfield',
@@ -17739,7 +18839,18 @@ Ext.define('PVE.window.Migrate', {
 	    selectAll: true,
 	    allowBlank: false,
 	    nodename: me.nodename,
-	    action: me.action
+	    action: me.action,
+	    listeners: {
+		selectionchange: function(vmselector, records) {
+		    if (me.action == 'migrateall') {
+			var showWarning = records.some(function(item) {
+			    return (item.data.type == 'lxc' &&
+				item.data.status == 'running');
+			});
+			me.down('#lxcwarning').setVisible(showWarning);
+		    }
+		}
+	    }
 	});
 
 	me.formPanel = Ext.create('Ext.form.Panel', {
@@ -18412,7 +19523,8 @@ Ext.define('PVE.qemu.OSTypeInputPanel', {
 
 	    me.setWidget('pveBusSelector', targetValues.busType);
 	    me.setWidget('pveNetworkCardSelector', targetValues.networkCard);
-	    me.setWidget('field[name=scsihw]', targetValues.scsihw);
+	    var scsihw = targetValues.scsihw || '__default__';
+	    this.getViewModel().set('current.scsihw', scsihw);
 	},
 	setWidget: function(widget, newValue) {
 	    // changing a widget is safe only if ComponentQuery.query returns us
@@ -18712,6 +19824,7 @@ Ext.define('PVE.qemu.ProcessorInputPanel', {
 	    xtype: 'proxmoxintegerfield',
 	    name: 'vcpus',
 	    minValue: 1,
+	    maxValue: 1,
 	    value: '',
 	    fieldLabel: gettext('VCPUs'),
 	    deleteEmpty: true,
@@ -19217,7 +20330,8 @@ Ext.define('PVE.qemu.NetworkInputPanel', {
 	    {
 		xtype: 'proxmoxcheckbox',
 		fieldLabel: gettext('Firewall'),
-		name: 'firewall'
+		name: 'firewall',
+		checked: (me.insideWizard || me.isCreate)
 	    }
 	];
 
@@ -19320,7 +20434,8 @@ Ext.define('PVE.qemu.NetworkEdit', {
 
 	var ipanel = Ext.create('PVE.qemu.NetworkInputPanel', {
 	    confid: me.confid,
-	    nodename: nodename
+	    nodename: nodename,
+	    isCreate: me.isCreate
 	});
 
 	Ext.applyIf(me, {
@@ -19618,12 +20733,14 @@ Ext.define('PVE.qemu.CDInputPanel', {
 Ext.define('PVE.qemu.CDEdit', {
     extend: 'Proxmox.window.Edit',
 
+    width: 400,
+
     initComponent : function() {
 	var me = this;
 
 	var nodename = me.pveSelNode.data.node;
-	if (!nodename) { 
-	    throw "no node name specified";	    
+	if (!nodename) {
+	    throw "no node name specified";
 	}
 
 	me.isCreate = me.confid ? false : true;
@@ -19765,10 +20882,6 @@ Ext.define('PVE.qemu.HDInputPanel', {
 	    delete me.drive.cache;
 	}
 
-	if (values.scsihw) {
-	    params.scsihw = values.scsihw;
-	}
-
         var names = ['mbps_rd', 'mbps_wr', 'iops_rd', 'iops_wr'];
         Ext.Array.each(names, function(name) {
             if (values[name]) {
@@ -19869,12 +20982,13 @@ Ext.define('PVE.qemu.HDInputPanel', {
 	    me.column1.push(me.bussel);
 
 	    me.scsiController = Ext.create('Ext.form.field.Display', {
-		name: 'scsihw',
 		fieldLabel: gettext('SCSI Controller'),
 		reference: 'scsiController',
+		bind: me.insideWizard ? {
+		    value: '{current.scsihw}'
+		} : undefined,
 		renderer: PVE.Utils.render_scsihw,
-		// do not change a VM wide option after creation
-		submitValue: me.insideWizard,
+		submitValue: false,
 		hidden: true
 	    });
 	    me.column1.push(me.scsiController);
@@ -20468,6 +21582,7 @@ Ext.define('PVE.qemu.DisplayInputPanel', {
 		    case "vmware":
 			emptyText = "16";
 			break;
+		    case "none":
 		    case "serial0":
 		    case "serial1":
 		    case "serial2":
@@ -20554,6 +21669,9 @@ Ext.define('PVE.qemu.HardwareView', {
 	var me = this;
 	var rows = me.rows;
 	var rowdef = rows[key] || {};
+	var iconCls = rowdef.iconCls;
+	var icon = '';
+	var txt = (rowdef.header || key);
 
 	metaData.tdAttr = "valign=middle";
 
@@ -20572,8 +21690,11 @@ Ext.define('PVE.qemu.HardwareView', {
 		    return rowdef.cdheader;
 		}
 	    }
+	} else if (iconCls) {
+	    icon = "<i class='pve-grid-fa fa fa-fw fa-" + iconCls + "'></i>";
+	    metaData.tdCls += " pve-itype-fa";
 	}
-	return rowdef.header || key;
+	return icon + txt;
     },
 
     initComponent : function() {
@@ -20591,7 +21712,9 @@ Ext.define('PVE.qemu.HardwareView', {
 	}
 
 	var caps = Ext.state.Manager.get('GuiCap');
+	var diskCap = caps.vms['VM.Config.Disk'];
 
+	/*jslint confusion: true */
 	var rows = {
 	    memory: {
 		header: gettext('Memory'),
@@ -20667,23 +21790,54 @@ Ext.define('PVE.qemu.HardwareView', {
 		    return res;
 		}
 	    },
-	    keyboard: {
-		header: gettext('Keyboard Layout'),
+	    bios: {
+		header: 'BIOS',
+		group: 4,
 		never_delete: true,
-		editor: caps.vms['VM.Config.Options'] ? 'PVE.qemu.KeyboardEdit' : undefined,
-		tdCls: 'pve-itype-icon-keyboard',
-		group: 1,
+		editor: caps.vms['VM.Config.Options'] ? 'PVE.qemu.BiosEdit' : undefined,
 		defaultValue: '',
-		renderer: PVE.Utils.render_kvm_language
+		iconCls: 'microchip',
+		renderer: PVE.Utils.render_qemu_bios
 	    },
 	    vga: {
 		header: gettext('Display'),
 		editor: caps.vms['VM.Config.HWType'] ? 'PVE.qemu.DisplayEdit' : undefined,
 		never_delete: true,
 		tdCls: 'pve-itype-icon-display',
-		group:4,
+		group:5,
 		defaultValue: '',
 		renderer: PVE.Utils.render_kvm_vga_driver		
+	    },
+	    machine: {
+		header: gettext('Machine'),
+		editor: caps.vms['VM.Config.HWType'] ?  {
+		    xtype: 'proxmoxWindowEdit',
+		    subject: gettext('Machine'),
+		    width: 350,
+		    items: [{
+			xtype: 'proxmoxKVComboBox',
+			name: 'machine',
+			value: '__default__',
+			fieldLabel: gettext('Machine'),
+			comboItems: [
+			    ['__default__', PVE.Utils.render_qemu_machine('')],
+			    ['q35', 'q35']
+			]
+		    }]} : undefined,
+		iconCls: 'cogs',
+		never_delete: true,
+		group: 6,
+		defaultValue: '',
+		renderer: PVE.Utils.render_qemu_machine
+	    },
+	    scsihw: {
+		header: gettext('SCSI Controller'),
+		iconCls: 'database',
+		editor: caps.vms['VM.Config.Options'] ? 'PVE.qemu.ScsiHwEdit' : undefined,
+		renderer: PVE.Utils.render_scsihw,
+		group: 7,
+		never_delete: true,
+		defaultValue: ''
 	    },
 	    cores: {
 		visible: false
@@ -20709,18 +21863,16 @@ Ext.define('PVE.qemu.HardwareView', {
 	    cpulimit: {
 		visible: false
 	    },
-	    bios: {
-		visible: false
-	    },
 	    shares: {
 		visible: false
 	    }
 	};
+	/*jslint confusion: false */
 
 	PVE.Utils.forEachBus(undefined, function(type, id) {
 	    var confid = type + id;
 	    rows[confid] = {
-		group: 5,
+		group: 10,
 		tdCls: 'pve-itype-icon-storage',
 		editor: 'PVE.qemu.HDEdit',
 		never_delete: caps.vms['VM.Config.Disk'] ? false : true,
@@ -20732,7 +21884,7 @@ Ext.define('PVE.qemu.HardwareView', {
 	for (i = 0; i < 32; i++) {
 	    confid = "net" + i.toString();
 	    rows[confid] = {
-		group: 6,
+		group: 15,
 		order: i,
 		tdCls: 'pve-itype-icon-network',
 		editor: caps.vms['VM.Config.Network'] ? 'PVE.qemu.NetworkEdit' : undefined,
@@ -20741,7 +21893,7 @@ Ext.define('PVE.qemu.HardwareView', {
 	    };
 	}
 	rows.efidisk0 = {
-	    group: 7,
+	    group: 20,
 	    tdCls: 'pve-itype-icon-storage',
 	    editor: null,
 	    never_delete: caps.vms['VM.Config.Disk'] ? false : true,
@@ -20750,7 +21902,7 @@ Ext.define('PVE.qemu.HardwareView', {
 	for (i = 0; i < 5; i++) {
 	    confid = "usb" + i.toString();
 	    rows[confid] = {
-		group: 8,
+		group: 25,
 		order: i,
 		tdCls: 'pve-itype-icon-usb',
 		editor: caps.nodes['Sys.Console'] ? 'PVE.qemu.USBEdit' : undefined,
@@ -20761,7 +21913,7 @@ Ext.define('PVE.qemu.HardwareView', {
 	for (i = 0; i < 4; i++) {
 	    confid = "hostpci" + i.toString();
 	    rows[confid] = {
-		group: 9,
+		group: 30,
 		order: i,
 		tdCls: 'pve-itype-icon-pci',
 		never_delete: caps.nodes['Sys.Console'] ? false : true,
@@ -20772,7 +21924,7 @@ Ext.define('PVE.qemu.HardwareView', {
 	for (i = 0; i < 4; i++) {
 	    confid = "serial" + i.toString();
 	    rows[confid] = {
-		group: 10,
+		group: 35,
 		order: i,
 		tdCls: 'pve-itype-icon-serial',
 		never_delete: caps.nodes['Sys.Console'] ? false : true,
@@ -20835,6 +21987,9 @@ Ext.define('PVE.qemu.HardwareView', {
 
 	    var editor = rowdef.editor;
 	    if (rowdef.tdCls == 'pve-itype-icon-storage') {
+		if (!diskCap) {
+		    return;
+		}
 		var value = me.getObjectValue(rec.data.key, '', true); 
 		if (value.match(/vm-.*-cloudinit/)) {
 		    return;
@@ -21091,15 +22246,15 @@ Ext.define('PVE.qemu.HardwareView', {
 
 	    var isEfi = (key === 'efidisk0');
 
-	    remove_btn.setDisabled(rec.data['delete'] || (rowdef.never_delete === true));
+	    remove_btn.setDisabled(rec.data['delete'] || (rowdef.never_delete === true) || (isUnusedDisk && !diskCap));
 	    remove_btn.setText((isUsedDisk && !isCloudInit) ? remove_btn.altText : remove_btn.defaultText);
 	    remove_btn.RESTMethod = isUnusedDisk ? 'POST':'PUT';
 
-	    edit_btn.setDisabled(rec.data['delete'] || !rowdef.editor || isCloudInit);
+	    edit_btn.setDisabled(rec.data['delete'] || !rowdef.editor || isCloudInit || !diskCap);
 
-	    resize_btn.setDisabled(pending || !isUsedDisk);
+	    resize_btn.setDisabled(pending || !isUsedDisk || !diskCap);
 
-	    move_btn.setDisabled(pending || !isUsedDisk);
+	    move_btn.setDisabled(pending || !isUsedDisk || !diskCap);
 
 	    revert_btn.setDisabled(!pending);
 
@@ -21148,7 +22303,8 @@ Ext.define('PVE.qemu.HardwareView', {
 				handler: function() {
 				    var win = Ext.create('PVE.qemu.NetworkEdit', {
 					url: '/api2/extjs/' + baseurl,
-					pveSelNode: me.pveSelNode
+					pveSelNode: me.pveSelNode,
+					isCreate: true
 				    });
 				    win.on('destroy', reload);
 				    win.show();
@@ -21491,18 +22647,6 @@ Ext.define('PVE.qemu.Options', {
 		    }
 		} : undefined
 	    },
-	    scsihw: {
-		header: gettext('SCSI Controller'),
-		editor: caps.vms['VM.Config.Options'] ? 'PVE.qemu.ScsiHwEdit' : undefined,
-		renderer: PVE.Utils.render_scsihw,
-		defaultValue: ''
-	    },
-	    bios: {
-		header: 'BIOS',
-		editor: caps.vms['VM.Config.Options'] ? 'PVE.qemu.BiosEdit' : undefined,
-		renderer: PVE.Utils.render_qemu_bios,
-		defaultValue: ''
-	    },
 	    kvm: {
 		header: gettext('KVM hardware virtualization'),
 		defaultValue: true,
@@ -21609,6 +22753,9 @@ Ext.define('PVE.qemu.Options', {
 			fieldLabel: gettext('Enabled')
 		    }
 		} : undefined
+	    },
+	    hookscript: {
+		header: gettext('Hookscript')
 	    }
 	};
 
@@ -22371,9 +23518,27 @@ Ext.define('PVE.qemu.Config', {
 	    },
 	    menu: {
 		items: [{
+		    text: gettext('Pause'),
+		    disabled: !caps.vms['VM.PowerMgmt'],
+		    confirmMsg: Proxmox.Utils.format_task_description('qmpause', vmid),
+		    handler: function() {
+			vm_command("suspend");
+		    },
+		    iconCls: 'fa fa-pause'
+		},{
+		    text: gettext('Hibernate'),
+		    disabled: !caps.vms['VM.PowerMgmt'],
+		    confirmMsg: Proxmox.Utils.format_task_description('qmsuspend', vmid),
+		    tooltip: gettext('Suspend to disk'),
+		    handler: function() {
+			vm_command("suspend", { todisk: 1 });
+		    },
+		    iconCls: 'fa fa-download'
+		},{
 		    text: gettext('Stop'),
 		    disabled: !caps.vms['VM.PowerMgmt'],
 		    dangerous: true,
+		    tooltip: Ext.String.format(gettext('Stop {0} immediately'), 'VM'),
 		    confirmMsg: Proxmox.Utils.format_task_description('qmstop', vmid),
 		    handler: function() {
 			vm_command("stop", { timeout: 30 });
@@ -22403,10 +23568,22 @@ Ext.define('PVE.qemu.Config', {
 	    vmid: vmid
 	});
 
+	var statusTxt = Ext.create('Ext.toolbar.TextItem', {
+	    data: {
+		lock: undefined
+	    },
+	    tpl: [
+		'<tpl if="lock">',
+		'<i class="fa fa-lg fa-lock"></i> ({lock})',
+		'</tpl>'
+	    ]
+	});
+
 	Ext.apply(me, {
 	    title: Ext.String.format(gettext("Virtual Machine {0} on node '{1}'"), vm.text, nodename),
 	    hstateid: 'kvmtab',
-	    tbar: [ resumeBtn, startBtn, shutdownBtn, migrateBtn, consoleBtn, moreBtn ],
+	    tbarSpacing: false,
+	    tbar: [ statusTxt, '->', resumeBtn, startBtn, shutdownBtn, migrateBtn, consoleBtn, moreBtn ],
 	    defaults: { statusStore: me.statusStore },
 	    items: [
 		{
@@ -22559,6 +23736,7 @@ Ext.define('PVE.qemu.Config', {
 	    var qmpstatus;
 	    var spice = false;
 	    var xtermjs = false;
+	    var lock;
 
 	    if (!success) {
 		status = qmpstatus = 'unknown';
@@ -22569,6 +23747,8 @@ Ext.define('PVE.qemu.Config', {
 		qmpstatus = rec ? rec.data.value : 'unknown';
 		rec = s.data.get('template');
 		template = rec.data.value || false;
+		rec = s.data.get('lock');
+		lock = rec ? rec.data.value : undefined;
 
 		spice = s.data.get('spice') ? true : false;
 		xtermjs = s.data.get('serial') ? true : false;
@@ -22579,7 +23759,9 @@ Ext.define('PVE.qemu.Config', {
 		return;
 	    }
 
-	    if (qmpstatus === 'prelaunch' || qmpstatus === 'paused' || qmpstatus === 'suspended') {
+	    var resume = (['prelaunch', 'paused', 'suspended'].indexOf(qmpstatus) !== -1);
+
+	    if (resume || lock === 'suspended') {
 		startBtn.setVisible(false);
 		resumeBtn.setVisible(true);
 	    } else {
@@ -22589,6 +23771,8 @@ Ext.define('PVE.qemu.Config', {
 
 	    consoleBtn.setEnableSpice(spice);
 	    consoleBtn.setEnableXtermJS(xtermjs);
+
+	    statusTxt.update({ lock: lock });
 
 	    startBtn.setDisabled(!caps.vms['VM.PowerMgmt'] || status === 'running' || template);
 	    shutdownBtn.setDisabled(!caps.vms['VM.PowerMgmt'] || status !== 'running');
@@ -22613,7 +23797,10 @@ Ext.define('PVE.qemu.CreateWizard', {
 
     viewModel: {
 	data: {
-	    nodename: ''
+	    nodename: '',
+	    current: {
+		scsihw: ''
+	    }
 	}
     },
 
@@ -22677,14 +23864,6 @@ Ext.define('PVE.qemu.CreateWizard', {
 		    defaultValue: 0,
 		    deleteDefaultValue: true,
 		    fieldLabel: gettext('Start at boot')
-		},
-		{
-		    xtype: 'proxmoxcheckbox',
-		    name: 'agent',
-		    uncheckedValue: 0,
-		    defaultValue: 0,
-		    deleteDefaultValue: true,
-		    fieldLabel: gettext('Qemu Agent')
 		}
 	    ],
 	    advancedColumn2: [
@@ -22760,6 +23939,12 @@ Ext.define('PVE.qemu.CreateWizard', {
 		    insideWizard: true
 		}
 	    ]
+	},
+	{
+	    xtype: 'pveQemuSystemPanel',
+	    title: gettext('System'),
+	    isCreate: true,
+	    insideWizard: true
 	},
 	{
 	    xtype: 'pveQemuHDInputPanel',
@@ -24348,6 +25533,160 @@ Ext.define('PVE.qemu.IPConfigEdit', {
 	});
     }
 });
+/*jslint confusion: true*/
+Ext.define('PVE.qemu.SystemInputPanel', {
+    extend: 'Proxmox.panel.InputPanel',
+    xtype: 'pveQemuSystemPanel',
+
+    onlineHelp: 'qm_system_settings',
+
+    viewModel: {
+	data: {
+	    efi: false,
+	    addefi: true
+	},
+
+	formulas: {
+	    efidisk: function(get) {
+		return get('efi') && get('addefi');
+	    }
+	}
+    },
+
+    onGetValues: function(values) {
+	if (values.vga && values.vga.substr(0,6) === 'serial') {
+	    values['serial' + values.vga.substr(6,1)] = 'socket';
+	}
+
+	var efidrive = {};
+	if (values.hdimage) {
+	    efidrive.file = values.hdimage;
+	} else if (values.hdstorage) {
+	    efidrive.file = values.hdstorage + ":1";
+	}
+
+	if (values.diskformat) {
+	    efidrive.format = values.diskformat;
+	}
+
+	delete values.hdimage;
+	delete values.hdstorage;
+	delete values.diskformat;
+
+	if (efidrive.file) {
+	    values.efidisk0 = PVE.Parser.printQemuDrive(efidrive);
+	}
+
+	return values;
+    },
+
+    controller: {
+	xclass: 'Ext.app.ViewController',
+
+	scsihwChange: function(field, value) {
+	    var me = this;
+	    if (me.getView().insideWizard) {
+		me.getViewModel().set('current.scsihw', value);
+	    }
+	},
+
+	biosChange: function(field, value) {
+	    var me = this;
+	    if (me.getView().insideWizard) {
+		me.getViewModel().set('efi', value === 'ovmf');
+	    }
+	},
+
+	control: {
+	    'pveScsiHwSelector': {
+		change: 'scsihwChange'
+	    },
+	    'pveQemuBiosSelector': {
+		change: 'biosChange'
+	    }
+	}
+    },
+
+    column1: [
+	{
+	    xtype: 'proxmoxKVComboBox',
+	    value: '__default__',
+	    deleteEmpty: false,
+	    fieldLabel: gettext('Graphic card'),
+	    name: 'vga',
+	    comboItems: PVE.Utils.kvm_vga_driver_array()
+	},
+	{
+	    xtype: 'proxmoxcheckbox',
+	    name: 'agent',
+	    uncheckedValue: 0,
+	    defaultValue: 0,
+	    deleteDefaultValue: true,
+	    fieldLabel: gettext('Qemu Agent')
+	}
+    ],
+
+    column2: [
+	{
+	    xtype: 'pveScsiHwSelector',
+	    name: 'scsihw',
+	    value: '__default__',
+	    bind: {
+		value: '{current.scsihw}'
+	    },
+	    fieldLabel: gettext('SCSI Controller')
+	}
+    ],
+
+    advancedColumn1: [
+	{
+	    xtype: 'pveQemuBiosSelector',
+	    name: 'bios',
+	    value: '__default__',
+	    fieldLabel: 'BIOS'
+	},
+	{
+	    xtype: 'proxmoxcheckbox',
+	    bind: {
+		value: '{addefi}',
+		hidden: '{!efi}',
+		disabled: '{!efi}'
+	    },
+	    hidden: true,
+	    submitValue: false,
+	    disabled: true,
+	    fieldLabel: gettext('Add EFI Disk')
+	},
+	{
+	    xtype: 'pveDiskStorageSelector',
+	    name: 'efidisk0',
+	    storageContent: 'images',
+	    bind: {
+		nodename: '{nodename}',
+		hidden: '{!efi}',
+		disabled: '{!efidisk}'
+	    },
+	    autoSelect: false,
+	    disabled: true,
+	    hidden: true,
+	    hideSize: true
+	}
+    ],
+
+    advancedColumn2: [
+	{
+	    xtype: 'proxmoxKVComboBox',
+	    name: 'machine',
+	    value: '__default__',
+	    fieldLabel: gettext('Machine'),
+	    comboItems: [
+		['__default__', PVE.Utils.render_qemu_machine('')],
+		['q35', 'q35']
+	    ]
+	}
+    ]
+
+});
 Ext.define('PVE.lxc.Summary', {
     extend: 'Ext.panel.Panel',
     alias: 'widget.pveLxcSummary',
@@ -24545,6 +25884,7 @@ Ext.define('PVE.lxc.NetworkInputPanel', {
 	    cdata.name = 'eth0';
 	    me.dataCache = {};
 	}
+	cdata.firewall =  (me.insideWizard || me.isCreate);
 
 	if (!me.dataCache) {
 	    throw "no dataCache specified";
@@ -24640,7 +25980,7 @@ Ext.define('PVE.lxc.NetworkInputPanel', {
 		xtype: 'proxmoxcheckbox',
 		fieldLabel: gettext('Firewall'),
 		name: 'firewall',
-		checked: cdata.firewall
+		value: cdata.firewall
 	    }
 	];
 
@@ -25081,6 +26421,7 @@ Ext.define('PVE.lxc.RessourceView', {
 	}
 
 	var caps = Ext.state.Manager.get('GuiCap');
+	var diskCap = caps.vms['VM.Config.Disk'];
 
 	var mpeditor = caps.vms['VM.Config.Disk'] ? 'PVE.lxc.MountPointEdit' : undefined;
 
@@ -25288,9 +26629,9 @@ Ext.define('PVE.lxc.RessourceView', {
 	    }
 	    edit_btn.setDisabled(noedit);
 
-	    remove_btn.setDisabled(!isDisk || rec.data.key === 'rootfs');
-	    resize_btn.setDisabled(!isDisk);
-	    move_btn.setDisabled(!isDisk);
+	    remove_btn.setDisabled(!isDisk || rec.data.key === 'rootfs' || !diskCap);
+	    resize_btn.setDisabled(!isDisk || !diskCap);
+	    move_btn.setDisabled(!isDisk || !diskCap);
 
 	};
 	
@@ -25639,6 +26980,9 @@ Ext.define('PVE.lxc.Options', {
 		defaultValue: Proxmox.Utils.noneText,
 		editor: Proxmox.UserName === 'root@pam' ?
 		    'PVE.lxc.FeaturesEdit' : undefined
+	    },
+	    hookscript: {
+		header: gettext('Hookscript')
 	    }
 	};
 
@@ -25982,6 +27326,7 @@ Ext.define('PVE.lxc.Config', {
 	    text: gettext('Stop'),
 	    disabled: !caps.vms['VM.PowerMgmt'],
 	    confirmMsg: Proxmox.Utils.format_task_description('vzstop', vmid),
+	    tooltip: Ext.String.format(gettext('Stop {0} immediately'), 'CT'),
 	    dangerous: true,
 	    handler: function() {
 		vm_command("stop");
@@ -26086,10 +27431,23 @@ Ext.define('PVE.lxc.Config', {
 	    vmid: vmid
 	});
 
+	var statusTxt = Ext.create('Ext.toolbar.TextItem', {
+	    data: {
+		lock: undefined
+	    },
+	    tpl: [
+		'<tpl if="lock">',
+		'<i class="fa fa-lg fa-lock"></i> ({lock})',
+		'</tpl>'
+	    ]
+	});
+
+
 	Ext.apply(me, {
 	    title: Ext.String.format(gettext("Container {0} on node '{1}'"), vm.text, nodename),
 	    hstateid: 'lxctab',
-	    tbar: [ startBtn, shutdownBtn, migrateBtn, consoleBtn, moreBtn ],
+	    tbarSpacing: false,
+	    tbar: [ statusTxt, '->', startBtn, shutdownBtn, migrateBtn, consoleBtn, moreBtn ],
 	    defaults: { statusStore: me.statusStore },
 	    items: [
 		{
@@ -26240,6 +27598,7 @@ Ext.define('PVE.lxc.Config', {
 
 	me.mon(me.statusStore, 'load', function(s, records, success) {
 	    var status;
+	    var lock;
 	    if (!success) {
 		status = 'unknown';
 	    } else {
@@ -26247,7 +27606,12 @@ Ext.define('PVE.lxc.Config', {
 		status = rec ? rec.data.value : 'unknown';
 		rec = s.data.get('template');
 		template = rec.data.value || false;
+		rec = s.data.get('lock');
+		lock = rec ? rec.data.value : undefined;
 	    }
+
+	    statusTxt.update({ lock: lock });
+
 	    startBtn.setDisabled(!caps.vms['VM.PowerMgmt'] || status === 'running' || template);
 	    shutdownBtn.setDisabled(!caps.vms['VM.PowerMgmt'] || status !== 'running');
 	    stopBtn.setDisabled(!caps.vms['VM.PowerMgmt'] || status === 'stopped');
@@ -26273,7 +27637,7 @@ Ext.define('PVE.lxc.CreateWizard', {
 	data: {
 	    nodename: '',
 	    storage: '',
-	    unprivileged: false
+	    unprivileged: true
 	}
     },
 
@@ -26323,7 +27687,7 @@ Ext.define('PVE.lxc.CreateWizard', {
 		{
 		    xtype: 'proxmoxcheckbox',
 		    name: 'unprivileged',
-		    value: false,
+		    value: true,
 		    bind: {
 			value: '{unprivileged}'
 		    },
@@ -27983,6 +29347,26 @@ Ext.define('PVE.grid.TemplateSelector', {
 	Ext.apply(me, {
 	    store: store,
 	    selModel: sm,
+	    tbar: [
+		'->',
+		gettext('Search'),
+		{
+		    xtype: 'textfield',
+		    width: 200,
+		    enableKeyEvents: true,
+		    listeners: {
+			buffer: 500,
+			keyup: function(field) {
+			    var value = field.getValue().toLowerCase();
+			    store.clearFilter(true);
+			    store.filterBy(function(rec) {
+				return (rec.data['package'].toLowerCase().indexOf(value) !== -1)
+				|| (rec.data.headline.toLowerCase().indexOf(value) !== -1);
+			    });
+			}
+		    }
+		}
+	    ],
 	    features: [ groupingFeature ],
 	    columns: [
 		{
@@ -28035,8 +29419,8 @@ Ext.define('PVE.storage.TemplateDownload', {
     modal: true,
     title: gettext('Templates'),
     layout: 'fit',
-    width: 600,
-    height: 400,
+    width: 900,
+    height: 600,
     initComponent : function() {
 	/*jslint confusion: true */
         var me = this;
@@ -28748,7 +30132,9 @@ Ext.define('PVE.storage.Browser', {
 	    hstateid: 'storagetab'
 	});
 
-	if (caps.storage['Datastore.Allocate']) {
+	if (caps.storage['Datastore.Allocate'] ||
+	    caps.storage['Datastore.AllocateSpace'] ||
+	    caps.storage['Datastore.Audit']) {
 	    me.items.push({
 		xtype: 'pveStorageContentView',
 		title: gettext('Content'),
@@ -29246,7 +30632,7 @@ Ext.define('PVE.storage.GlusterFsInputPanel', {
 	    },
 	    {
 		xtype: 'pveContentTypeSelector',
-		cts: ['images', 'iso', 'backup', 'vztmpl'],
+		cts: ['images', 'iso', 'backup', 'vztmpl', 'snippets'],
 		name: 'content',
 		value: 'images',
 		multiSelect: true,
@@ -29810,7 +31196,7 @@ Ext.define('PVE.storage.CephFSInputPanel', {
 	me.column2 = [
 	    {
 		xtype: 'pveContentTypeSelector',
-		cts: ['backup', 'iso', 'vztmpl'],
+		cts: ['backup', 'iso', 'vztmpl', 'snippets'],
 		fieldLabel: gettext('Content'),
 		name: 'content',
 		value: 'backup',
@@ -29949,9 +31335,11 @@ Ext.define('PVE.storage.RBDInputPanel', {
 	}
 	me.type = 'rbd';
 
-	me.column1 = [
-	    {
-		xtype: me.isCreate ? 'pveCephPoolSelector' : 'displayfield',
+	me.column1 = [];
+
+	if (me.isCreate) {
+	    me.column1.push({
+		xtype: 'pveCephPoolSelector',
 		nodename: me.nodename,
 		name: 'pool',
 		bind: {
@@ -29961,9 +31349,8 @@ Ext.define('PVE.storage.RBDInputPanel', {
 		},
 		fieldLabel: gettext('Pool'),
 		allowBlank: false
-	    },
-	    {
-		xtype: me.isCreate ? 'textfield' : 'displayfield',
+	    },{
+		xtype: 'textfield',
 		name: 'pool',
 		value: 'rbd',
 		bind: {
@@ -29973,7 +31360,18 @@ Ext.define('PVE.storage.RBDInputPanel', {
 		},
 		fieldLabel: gettext('Pool'),
 		allowBlank: false
-	    },
+	    });
+	} else {
+	    me.column1.push({
+		xtype: 'displayfield',
+		nodename: me.nodename,
+		name: 'pool',
+		fieldLabel: gettext('Pool'),
+		allowBlank: false
+	    });
+	}
+
+	me.column1.push(
 	    {
 		xtype: 'textfield',
 		name: 'monhost',
@@ -30008,7 +31406,7 @@ Ext.define('PVE.storage.RBDInputPanel', {
 		fieldLabel: gettext('User name'),
 		allowBlank: true
 	    }
-	];
+	);
 
 	me.column2 = [
 	    {
@@ -30577,7 +31975,6 @@ Ext.define('PVE.ha.VMResourceInputPanel', {
 		name: 'vmid',
 		fieldLabel: (me.vmid && me.guestType === 'ct') ? 'CT' : 'VM',
 		value: me.vmid,
-		loadNextGuestID: false,
 		store: vmidStore,
 		validateExists: true
 	    },
@@ -31369,6 +32766,25 @@ Ext.define('PVE.dc.Summary', {
 	    itemId: 'nodeview',
 	    xtype: 'pveDcNodeView',
 	    height: 250
+	},
+	{
+	    title: gettext('Subscriptions'),
+	    height: 220,
+	    items: [
+		{
+		    itemId: 'subscriptions',
+		    xtype: 'pveHealthWidget',
+		    userCls: 'pointer',
+		    listeners: {
+			element: 'el',
+			click: function() {
+			    if (this.component.userCls === 'pointer') {
+				window.open('https://www.proxmox.com/en/proxmox-ve/pricing', '_blank');
+			    }
+			}
+		    }
+		}
+	    ]
 	}
     ],
 
@@ -31517,6 +32933,51 @@ Ext.define('PVE.dc.Summary', {
 
 	var dcHealth = me.getComponent('dcHealth');
 	me.mon(rstore, 'load', dcHealth.updateStatus, dcHealth);
+
+	var subs = me.down('#subscriptions');
+	me.mon(rstore, 'load', function(store, records, success) {
+	    var i;
+	    var level;
+	    var curlevel;
+	    for (i = 0; i < records.length; i++) {
+		if (records[i].get('type') !== 'node') {
+		    continue;
+		}
+
+		curlevel = records[i].get('level');
+		if (level === undefined || !curlevel) {
+		    level = curlevel;
+		    continue;
+		}
+
+		if (level !== curlevel) {
+		    break;
+		}
+	    }
+
+	    if (level === '') {
+		subs.setData({
+		    title: gettext('No Subscription'),
+		    iconCls: PVE.Utils.get_health_icon('critical', true),
+		    text: gettext('You have at least one node without subscription.')
+		});
+		subs.setUserCls('pointer');
+	    } else if (level !== curlevel) {
+		subs.setData({
+		    title: gettext('Mixed Subscriptions'),
+		    iconCls: PVE.Utils.get_health_icon('warning', true),
+		    text: gettext('Warning: Your subscription levels are not the same.')
+		});
+		subs.setUserCls('pointer');
+	    } else {
+		subs.setData({
+		    title: PVE.Utils.render_support_level(level),
+		    iconCls: PVE.Utils.get_health_icon('good', true),
+		    text: gettext('Your subscription status is valid.')
+		});
+		subs.setUserCls('');
+	    }
+	});
 
 	me.on('destroy', function(){
 	    rstore.stopUpdate();
@@ -32046,7 +33507,8 @@ Ext.define('PVE.dc.Health', {
 	}
     },
 
-    cepherrors: 0,
+    nodeList: [],
+    nodeIndex: 0,
 
     updateStatus: function(store, records, success) {
 	var me = this;
@@ -32103,18 +33565,17 @@ Ext.define('PVE.dc.Health', {
 	    if (cephstatus.isVisible()) {
 		return;
 	    }
-	    me.cepherrors++;
 
-	    // after 3 unsuccessful tries of
-	    // /nodes/localhost/ceph/status
-	    // we give up (there probably is no ceph installed)
-	    if (me.cepherrors >= 3) {
+	    // try all nodes until we either get a successfull api call,
+	    // or we tried all nodes
+	    if (++me.nodeIndex >= me.nodeList.length) {
 		me.cephstore.stopUpdate();
+	    } else {
+		store.getProxy().setUrl('/api2/json/nodes/' + me.nodeList[me.nodeIndex].node + '/ceph/status');
 	    }
+
 	    return;
 	}
-
-	me.cepherrors = 0;
 
 	var state = PVE.Utils.render_ceph_health(records[0].data.health || {});
 	cephstatus.updateHealth(state);
@@ -32168,24 +33629,15 @@ Ext.define('PVE.dc.Health', {
 	    listeners: {
 		element: 'el',
 		click: function() {
-		    var me = this;
+		    var me = this.component.up('pveDcHealth');
 		    var sp = Ext.state.Manager.getProvider();
 
 		    // preselect the ceph tab
 		    sp.set('nodetab', {value:'ceph'});
 
-		    // select the first node which is online
-		    var nodeid = '';
-		    var nodes = PVE.data.ResourceStore.getNodes();
-		    Ext.Array.some(nodes, function(node) {
-			if (node.running) {
-			    nodeid = node.id;
-			    return true;
-			}
-
-			return false;
-		    });
-		    Ext.ComponentQuery.query('pveResourceTree')[0].selectById(nodeid);
+		    // select the node that had the successfull api call
+		    var id = me.nodeList[me.nodeIndex].id;
+		    Ext.ComponentQuery.query('pveResourceTree')[0].selectById(id);
 		}
 	    }
 	}
@@ -32194,17 +33646,19 @@ Ext.define('PVE.dc.Health', {
     initComponent: function() {
 	var me = this;
 
+	me.nodeList = PVE.data.ResourceStore.getNodes();
+	me.nodeIndex = 0;
 	me.cephstore = Ext.create('Proxmox.data.UpdateStore', {
 	    interval: 3000,
 	    storeid: 'pve-cluster-ceph',
 	    proxy: {
 		type: 'proxmox',
-		url: '/api2/json/nodes/localhost/ceph/status'
+		url: '/api2/json/nodes/' + me.nodeList[me.nodeIndex].node + '/ceph/status'
 	    }
 	});
 	me.callParent();
-	me.cephstore.startUpdate();
 	me.mon(me.cephstore, 'load', me.updateCeph, me);
+	me.cephstore.startUpdate();
     }
 });
 Ext.define('PVE.dc.Guests', {
@@ -32329,6 +33783,7 @@ Ext.define('PVE.dc.Guests', {
 	me.getComponent('error').update({num: error});
     }
 });
+ /*jslint confusion: true*/
 Ext.define('PVE.dc.OptionView', {
     extend: 'Proxmox.grid.ObjectGrid',
     alias: ['widget.pveDcOptionView'],
@@ -32337,8 +33792,53 @@ Ext.define('PVE.dc.OptionView', {
 
     monStoreErrors: true,
 
+    add_inputpanel_row: function(name, text, opts) {
+	var me = this;
+
+	opts = opts || {};
+	me.rows = me.rows || {};
+
+	var canEdit = (opts.caps === undefined || opts.caps);
+	me.rows[name] = {
+	    required: true,
+	    defaultValue: opts.defaultValue,
+	    header: text,
+	    renderer: opts.renderer,
+	    editor: canEdit ? {
+		xtype: 'proxmoxWindowEdit',
+		width: 350,
+		subject: text,
+		fieldDefaults: {
+		    labelWidth: opts.labelWidth || 100
+		},
+		setValues: function(values) {
+		    // FIXME: run through parsePropertyString if not an object?
+		    var edit_value = values[name];
+		    Ext.Array.each(this.query('inputpanel'), function(panel) {
+			panel.setValues(edit_value);
+		    });
+		},
+		url: opts.url,
+		items: [{
+		    xtype: 'inputpanel',
+		    onGetValues: function(values) {
+			if (values === undefined || Object.keys(values).length === 0) {
+			    return { 'delete': name };
+			}
+			var ret_val = {};
+			ret_val[name] = PVE.Parser.printPropertyString(values);
+			return ret_val;
+		    },
+		    items: opts.items
+		}]
+	    } : undefined
+	};
+    },
+
     initComponent : function() {
 	var me = this;
+
+	var caps = Ext.state.Manager.get('GuiCap');
 
 	me.add_combobox_row('keyboard', gettext('Keyboard Layout'), {
 	    renderer: PVE.Utils.render_kvm_language,
@@ -32363,9 +33863,54 @@ Ext.define('PVE.dc.OptionView', {
 	    defaultValue: 'root@$hostname'
 	});
 	me.add_text_row('mac_prefix', gettext('MAC address prefix'), {
+	    deleteEmpty: true,
 	    vtype: 'MacPrefix',
 	    defaultValue: Proxmox.Utils.noneText
 	});
+	me.add_inputpanel_row('migration', gettext('Migration Settings'), {
+	    renderer: PVE.Utils.render_dc_ha_opts,
+	    caps: caps.vms['Sys.Modify'],
+	    labelWidth: 120,
+	    url: "/api2/extjs/cluster/options",
+	    defaultKey: 'type',
+	    items: [{
+		xtype: 'displayfield',
+		name: 'type',
+		fieldLabel: gettext('Type'),
+		value: 'secure',
+		submitValue: true,
+		vtype: 'IPCIDRAddress'
+	    }, {
+		xtype: 'textfield',
+		name: 'network',
+		fieldLabel: gettext('Network'),
+		vtype: 'IPCIDRAddress',
+		emptyText: Proxmox.Utils.defaultText,
+		value: ''
+	    }]
+	});
+	me.add_inputpanel_row('ha', gettext('HA Settings'), {
+	    renderer: PVE.Utils.render_dc_ha_opts,
+	    caps: caps.vms['Sys.Modify'],
+	    labelWidth: 120,
+	    url: "/api2/extjs/cluster/options",
+	    items: [{
+		xtype: 'proxmoxKVComboBox',
+		name: 'shutdown_policy',
+		fieldLabel: gettext('Shutdown Policy'),
+		deleteEmpty: false,
+		value: '__default__',
+		comboItems: [
+		    ['__default__', Proxmox.Utils.defaultText + ' (conditional)' ],
+		    ['freeze', 'freeze'],
+		    ['failover', 'failover'],
+		    ['conditional', 'conditional']
+		],
+		defaultValue: '__default__'
+	    }]
+	});
+
+	// TODO: bwlimits, migration net, u2f?
 
 	me.selModel = Ext.create('Ext.selection.RowModel', {});
 
@@ -32590,6 +34135,519 @@ Ext.define('PVE.dc.StorageView', {
     });
 
 });
+/*global u2f,QRCode,Uint8Array*/
+/*jslint confusion: true*/
+Ext.define('PVE.window.TFAEdit', {
+    extend: 'Ext.window.Window',
+    mixins: ['Proxmox.Mixin.CBind'],
+
+    onlineHelp: 'pveum_tfa_auth', // fake to ensure this gets a link target
+
+    modal: true,
+    resizable: false,
+    title: gettext('Two Factor Authentication'),
+    subject: 'TFA',
+    url: '/api2/extjs/access/tfa',
+    width: 512,
+
+    layout: {
+	type: 'vbox',
+	align: 'stretch'
+    },
+
+    updateQrCode: function() {
+	var me = this;
+	var values = me.lookup('totp_form').getValues();
+	var algorithm = values.algorithm;
+	if (!algorithm) {
+	    algorithm = 'SHA1';
+	}
+
+	me.qrcode.makeCode(
+	    'otpauth://totp/' + encodeURIComponent(me.userid) +
+	    '?secret=' + values.secret +
+	    '&period=' + values.step +
+	    '&digits=' + values.digits +
+	    '&algorithm=' + algorithm +
+	    '&issuer=' + encodeURIComponent(values.issuer)
+	);
+
+	me.lookup('challenge').setVisible(true);
+	me.down('#qrbox').setVisible(true);
+    },
+
+    showError: function(error) {
+	Ext.Msg.alert(
+	    gettext('Error'),
+	    PVE.Utils.render_u2f_error(error)
+	);
+    },
+
+    doU2FChallenge: function(response) {
+	var me = this;
+
+	var data = response.result.data;
+	me.lookup('password').setDisabled(true);
+	var msg = Ext.Msg.show({
+	    title: 'U2F: '+gettext('Setup'),
+	    message: gettext('Please press the button on your U2F Device'),
+	    buttons: []
+	});
+	Ext.Function.defer(function() {
+	    u2f.register(data.appId, [data], [], function(data) {
+		msg.close();
+		if (data.errorCode) {
+		    me.showError(data.errorCode);
+		} else {
+		    me.respondToU2FChallenge(data);
+		}
+	    });
+	}, 500, me);
+    },
+
+    respondToU2FChallenge: function(data) {
+	var me = this;
+	var params = {
+	    userid: me.userid,
+	    action: 'confirm',
+	    response: JSON.stringify(data)
+	};
+	if (Proxmox.UserName !== 'root@pam') {
+	    params.password = me.lookup('password').value;
+	}
+	Proxmox.Utils.API2Request({
+	    url: '/api2/extjs/access/tfa',
+	    params: params,
+	    method: 'PUT',
+	    success: function() {
+		me.close();
+		Ext.Msg.show({
+		    title: gettext('Success'),
+		    message: gettext('U2F Device successfully connected.'),
+		    buttons: Ext.Msg.OK
+		});
+	    },
+	    failure: function(response, opts) {
+		Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+	    }
+	});
+    },
+
+    viewModel: {
+	data: {
+	    in_totp_tab: true,
+	    tfa_required: false,
+	    tfa_type: undefined,
+	    valid: false,
+	    u2f_available: true
+	},
+	formulas: {
+	    canDeleteTFA: function(get) {
+		return (get('tfa_type') !== undefined && !get('tfa_required'));
+	    },
+	    canSetupTOTP: function(get) {
+		var tfa = get('tfa_type');
+		return (tfa === undefined || tfa === 'totp' || tfa === 1);
+	    },
+	    canSetupU2F: function(get) {
+		var tfa = get('tfa_type');
+		return (get('u2f_available') && (tfa === undefined || tfa === 'u2f' || tfa === 1));
+	    }
+	}
+    },
+
+    afterLoadingRealm: function(realm_tfa_type) {
+	var me = this;
+	var viewmodel = me.getViewModel();
+	if (!realm_tfa_type) {
+	    // There's no TFA enforced by the realm, everything works.
+	    viewmodel.set('u2f_available', true);
+	    viewmodel.set('tfa_required', false);
+	} else if (realm_tfa_type === 'oath') {
+	    // The realm explicitly requires TOTP
+	    viewmodel.set('tfa_required', true);
+	    viewmodel.set('u2f_available', false);
+	} else {
+	    // The realm enforces some other TFA type (yubico)
+	    me.close();
+	    Ext.Msg.alert(
+		gettext('Error'),
+		Ext.String.format(
+		    gettext("Custom 2nd factor configuration is not supported on realms with '{0}' TFA."),
+		    realm_tfa_type
+		)
+	    );
+	}
+    },
+
+    controller: {
+	xclass: 'Ext.app.ViewController',
+	control: {
+	    'field[qrupdate=true]': {
+		change: function() {
+		    var me = this.getView();
+		    me.updateQrCode();
+		}
+	    },
+	    'field': {
+		validitychange: function(field, valid) {
+		    var me = this;
+		    var viewModel = me.getViewModel();
+		    var form = me.lookup('totp_form');
+		    var challenge = me.lookup('challenge');
+		    var password = me.lookup('password');
+		    viewModel.set('valid', form.isValid() && challenge.isValid() && password.isValid());
+		}
+	    },
+	    '#': {
+		show: function() {
+		    var me = this.getView();
+		    var viewmodel = this.getViewModel();
+
+		    me.qrdiv = document.createElement('center');
+		    me.qrcode = new QRCode(me.qrdiv, {
+			width: 256,
+			height: 256,
+			correctLevel: QRCode.CorrectLevel.M
+		    });
+		    me.down('#qrbox').getEl().appendChild(me.qrdiv);
+
+		    viewmodel.set('tfa_type', me.tfa_type);
+		    if (!me.tfa_type) {
+			this.randomizeSecret();
+		    } else {
+			me.down('#qrbox').setVisible(false);
+			me.lookup('challenge').setVisible(false);
+			if (me.tfa_type === 'u2f') {
+			    var u2f_panel = me.lookup('u2f_panel');
+			    me.lookup('tfatabs').setActiveTab(u2f_panel);
+			}
+		    }
+
+		    if (Proxmox.UserName === 'root@pam') {
+			me.lookup('password').setVisible(false);
+			me.lookup('password').setDisabled(true);
+		    }
+		}
+	    },
+	    '#tfatabs': {
+		tabchange: function(panel, newcard) {
+		    var viewmodel = this.getViewModel();
+		    viewmodel.set('in_totp_tab', newcard.itemId === 'totp-panel');
+		}
+	    }
+	},
+
+	applySettings: function() {
+	    var me = this;
+	    var values = me.lookup('totp_form').getValues();
+	    var params = {
+		userid: me.getView().userid,
+		action: 'new',
+		key: values.secret,
+		config: PVE.Parser.printPropertyString({
+		    type: 'oath',
+		    digits: values.digits,
+		    step: values.step
+		}),
+		// this is used to verify that the client generates the correct codes:
+		response: me.lookup('challenge').value
+	    };
+
+	    if (Proxmox.UserName !== 'root@pam') {
+		params.password = me.lookup('password').value;
+	    }
+
+	    Proxmox.Utils.API2Request({
+		url: '/api2/extjs/access/tfa',
+		params: params,
+		method: 'PUT',
+		waitMsgTarget: me.getView(),
+		success: function(response, opts) {
+		    me.getView().close();
+		},
+		failure: function(response, opts) {
+		    Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+		}
+	    });
+	},
+
+	deleteTFA: function() {
+	    var me = this;
+	    var values = me.lookup('totp_form').getValues();
+	    var params = {
+		userid: me.getView().userid,
+		action: 'delete'
+	    };
+
+	    if (Proxmox.UserName !== 'root@pam') {
+		params.password = me.lookup('password').value;
+	    }
+
+	    Proxmox.Utils.API2Request({
+		url: '/api2/extjs/access/tfa',
+		params: params,
+		method: 'PUT',
+		waitMsgTarget: me.getView(),
+		success: function(response, opts) {
+		    me.getView().close();
+		},
+		failure: function(response, opts) {
+		    Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+		}
+	    });
+	},
+
+	randomizeSecret: function() {
+	    var me = this;
+	    var rnd = new Uint8Array(16);
+	    window.crypto.getRandomValues(rnd);
+	    var data = '';
+	    rnd.forEach(function(b) {
+		// secret must be base32, so just use the first 5 bits
+		b = b & 0x1f;
+		if (b < 26) {
+		    // A..Z
+		    data += String.fromCharCode(b + 0x41);
+		} else {
+		    // 2..7
+		    data += String.fromCharCode(b-26 + 0x32);
+		}
+	    });
+	    me.lookup('tfa_secret').setValue(data);
+	},
+
+	startU2FRegistration: function() {
+	    var me = this;
+
+	    var params = {
+		userid: me.getView().userid,
+		action: 'new'
+	    };
+
+	    if (Proxmox.UserName !== 'root@pam') {
+		params.password = me.lookup('password').value;
+	    }
+
+	    Proxmox.Utils.API2Request({
+		url: '/api2/extjs/access/tfa',
+		params: params,
+		method: 'PUT',
+		waitMsgTarget: me.getView(),
+		success: function(response) {
+		    me.getView().doU2FChallenge(response);
+		},
+		failure: function(response, opts) {
+		    Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+		}
+	    });
+	}
+    },
+
+    items: [
+	{
+	    xtype: 'tabpanel',
+	    itemId: 'tfatabs',
+	    reference: 'tfatabs',
+	    border: false,
+	    items: [
+		{
+		    xtype: 'panel',
+		    title: 'TOTP',
+		    itemId: 'totp-panel',
+		    tfa_type: 'totp',
+		    border: false,
+		    bind: {
+			disabled: '{!canSetupTOTP}'
+		    },
+		    layout: {
+			type: 'vbox',
+			align: 'stretch'
+		    },
+		    items: [
+			{
+			    xtype: 'form',
+			    layout: 'anchor',
+			    border: false,
+			    reference: 'totp_form',
+			    fieldDefaults: {
+				anchor: '100%',
+				padding: '0 5'
+			    },
+			    items: [
+				{
+				    xtype: 'displayfield',
+				    fieldLabel: gettext('User name'),
+				    cbind: {
+					value: '{userid}'
+				    }
+				},
+				{
+				    layout: 'hbox',
+				    border: false,
+				    padding: '0 0 5 0',
+				    items: [{
+					xtype: 'textfield',
+					fieldLabel: gettext('Secret'),
+					emptyText: gettext('Unchanged'),
+					name: 'secret',
+					reference: 'tfa_secret',
+					regex: /^[A-Z2-7=]+$/,
+					regexText: 'Must be base32 [A-Z2-7=]',
+					maskRe: /[A-Z2-7=]/,
+					qrupdate: true,
+					flex: 4
+				    },
+				    {
+					xtype: 'button',
+					text: gettext('Randomize'),
+					reference: 'randomize_button',
+					handler: 'randomizeSecret',
+					flex: 1
+				    }]
+				},
+				{
+				    xtype: 'numberfield',
+				    fieldLabel: gettext('Time period'),
+				    name: 'step',
+				    // Google Authenticator ignores this and generates bogus data
+				    hidden: true,
+				    value: 30,
+				    minValue: 10,
+				    qrupdate: true
+				},
+				{
+				    xtype: 'numberfield',
+				    fieldLabel: gettext('Digits'),
+				    name: 'digits',
+				    value: 6,
+				    // Google Authenticator ignores this and generates bogus data
+				    hidden: true,
+				    minValue: 6,
+				    maxValue: 8,
+				    qrupdate: true
+				},
+				{
+				    xtype: 'textfield',
+				    fieldLabel: gettext('Issuer Name'),
+				    name: 'issuer',
+				    value: 'Proxmox Web UI',
+				    qrupdate: true
+				}
+			    ]
+			},
+			{
+			    xtype: 'box',
+			    itemId: 'qrbox',
+			    visible: false, // will be enabled when generating a qr code
+			    style: {
+				'background-color': 'white',
+				padding: '5px',
+				width: '266px',
+				height: '266px'
+			    }
+			},
+			{
+			    xtype: 'textfield',
+			    fieldLabel: gettext('Verification Code'),
+			    allowBlank: false,
+			    reference: 'challenge',
+			    padding: '0 5',
+			    emptyText: gettext('Scan QR code and enter TOTP auth. code to verify')
+			}
+		    ]
+		},
+		{
+		    title: 'U2F',
+		    itemId: 'u2f-panel',
+		    reference: 'u2f_panel',
+		    tfa_type: 'u2f',
+		    border: false,
+		    padding: '5 5',
+		    layout: {
+			type: 'vbox',
+			align: 'middle'
+		    },
+		    bind: {
+			disabled: '{!canSetupU2F}'
+		    },
+		    items: [
+			{
+			    xtype: 'label',
+			    width: 500,
+			    text: gettext('To register a U2F device, connect the device, then click the button and follow the instructions.')
+			}
+		    ]
+		}
+	    ]
+	},
+	{
+	    xtype: 'textfield',
+	    inputType: 'password',
+	    fieldLabel: gettext('Password'),
+	    minLength: 5,
+	    reference: 'password',
+	    allowBlank: false,
+	    validateBlank: true,
+	    padding: '0 0 5 5',
+	    emptyText: gettext('verify current password')
+	}
+    ],
+
+    buttons: [
+	{
+	    xtype: 'proxmoxHelpButton'
+	},
+	'->',
+	{
+	    text: gettext('Apply'),
+	    handler: 'applySettings',
+	    bind: {
+		hidden: '{!in_totp_tab}',
+		disabled: '{!valid}'
+	    }
+	},
+	{
+	    xtype: 'button',
+	    text: gettext('Register U2F Device'),
+	    handler: 'startU2FRegistration',
+	    bind: {
+		hidden: '{in_totp_tab}',
+		disabled: '{tfa_type}'
+	    }
+	},
+	{
+	    text: gettext('Delete'),
+	    reference: 'delete_button',
+	    disabled: true,
+	    handler: 'deleteTFA',
+	    bind: {
+		disabled: '{!canDeleteTFA}'
+	    }
+	}
+    ],
+
+    initComponent: function() {
+	var me = this;
+
+	var store = new Ext.data.Store({
+	    model: 'pve-domains',
+	    autoLoad: true
+	});
+
+	store.on('load', function() {
+	    var user_realm = me.userid.split('@')[1];
+	    var realm = me.store.findRecord('realm', user_realm);
+	    me.afterLoadingRealm(realm && realm.data && realm.data.tfa);
+	}, me);
+
+	Ext.apply(me, { store: store });
+
+	me.callParent();
+
+	Ext.GlobalEvents.fireEvent('proxmoxShowHelp', 'pveum_tfa_auth');
+    }
+});
 Ext.define('PVE.dc.UserEdit', {
     extend: 'Proxmox.window.Edit',
     alias: ['widget.pveDcUserEdit'],
@@ -32609,7 +34667,7 @@ Ext.define('PVE.dc.UserEdit', {
             url = '/api2/extjs/access/users';
             method = 'POST';
         } else {
-            url = '/api2/extjs/access/users/' + me.userid;
+            url = '/api2/extjs/access/users/' + encodeURIComponent(me.userid);
             method = 'PUT';
 	}
 
@@ -32712,19 +34770,6 @@ Ext.define('PVE.dc.UserEdit', {
 	    }
 	];
 
-	var columnB = [
-	    {
-		xtype: 'textfield',
-		name: 'comment',
-		fieldLabel: gettext('Comment')
-	    },
-	    {
-		xtype: 'textfield',
-		name: 'keys',
-		fieldLabel: gettext('Key IDs')
-	    }
-	];
- 
         if (me.isCreate) {
             column1.splice(1,0,{
                 xtype: 'pveRealmComboBox',
@@ -32746,7 +34791,20 @@ Ext.define('PVE.dc.UserEdit', {
 	var ipanel = Ext.create('Proxmox.panel.InputPanel', {
 	    column1: column1,
 	    column2: column2,
-	    columnB: columnB,
+	    columnB: [
+		{
+		    xtype: 'textfield',
+		    name: 'comment',
+		    fieldLabel: gettext('Comment')
+		}
+	    ],
+	    advancedItems: [
+		{
+		    xtype: 'textfield',
+		    name: 'keys',
+		    fieldLabel: gettext('Key IDs')
+		}
+	    ],
 	    onGetValues: function(values) {
 		// hack: ExtJS datefield does not submit 0, so we need to set that
 		if (!values.expire) {
@@ -32795,6 +34853,7 @@ Ext.define('PVE.dc.UserEdit', {
         }
     }
 });
+/*jslint confusion: true */
 Ext.define('PVE.dc.UserView', {
     extend: 'Ext.grid.GridPanel',
 
@@ -32875,6 +34934,22 @@ Ext.define('PVE.dc.UserView', {
 	    }
 	});
 
+	var tfachange_btn = new Proxmox.button.Button({
+	    text: 'TFA',
+	    disabled: true,
+	    selModel: sm,
+	    handler: function(btn, event, rec) {
+		var d = rec.data;
+		var tfa_type = PVE.Parser.parseTfaType(d.keys);
+		var win = Ext.create('PVE.window.TFAEdit',{
+		    tfa_type: tfa_type,
+		    userid: d.userid
+		});
+		win.on('destroy', reload);
+		win.show();
+	    }
+	});
+
         var tbar = [
             {
 		text: gettext('Add'),
@@ -32886,7 +34961,7 @@ Ext.define('PVE.dc.UserView', {
                     win.show();
 		}
             },
-	    edit_btn, remove_btn, pwchange_btn
+	    edit_btn, remove_btn, pwchange_btn, tfachange_btn
         ];
 
 	var render_username = function(userid) {
@@ -32939,6 +35014,22 @@ Ext.define('PVE.dc.UserView', {
 		    sortable: true,
 		    renderer: PVE.Utils.render_full_name,
 		    dataIndex: 'firstname'
+		},
+		{
+		    header: 'TFA',
+		    width: 50,
+		    sortable: true,
+		    renderer: function(v) {
+			var tfa_type = PVE.Parser.parseTfaType(v);
+			if (tfa_type === undefined) {
+			    return Proxmox.Utils.noText;
+			} else if (tfa_type === 1) {
+			    return Proxmox.Utils.yesText;
+			} else {
+			    return tfa_type;
+			}
+		    },
+		    dataIndex: 'keys'
 		},
 		{
 		    header: gettext('Comment'),
@@ -34265,6 +36356,7 @@ Ext.define('PVE.dc.BackupEdit', {
 		fieldLabel: gettext('Start Time'),
 		name: 'starttime',
 		format: 'H:i',
+		formatText: 'HH:MM',
 		value: '00:00',
 		allowBlank: false
 	    },
@@ -34296,26 +36388,7 @@ Ext.define('PVE.dc.BackupEdit', {
 		fieldLabel: gettext('Mode'),
 		value: 'snapshot',
 		name: 'mode'
-		},
-		{
-		xtype: 'numberfield',
-		fieldLabel: gettext('Max Backups'),
-		name: 'maxfiles',
-		minValue: 0,
-		maxValue: 365,
-		value: me.create ? '1' : undefined,
-		allowBlank: false
-		},
-		{
-		xtype: 'numberfield',
-		fieldLabel: gettext('Full Backup Every'),
-		name: 'fullbackup',
-		emptyText : gettext('Days'),
-		minValue: 0,
-		maxValue: 60,
-		value: me.create ? '0' : undefined,
-		allowBlank: true
-		},
+	    },
 	    {
 		xtype: 'proxmoxcheckbox',
 		fieldLabel: gettext('Enable'),
@@ -35900,8 +37973,7 @@ Ext.define('PVE.Workspace', {
     updateLoginData: function(loginData) {
 	var me = this;
 	me.loginData = loginData;
-	Proxmox.CSRFPreventionToken = loginData.CSRFPreventionToken;
-	Proxmox.UserName = loginData.username;
+	Proxmox.Utils.setAuthData(loginData);
 
 	var rt = me.down('pveResourceTree');
 	rt.setDatacenterText(loginData.clustername);
@@ -35910,9 +37982,6 @@ Ext.define('PVE.Workspace', {
 	    Ext.state.Manager.set('GuiCap', loginData.cap);
 	}
 
-	// creates a session cookie (expire = null) 
-	// that way the cookie gets deleted after browser window close
-	Ext.util.Cookies.set('PVEAuthCookie', loginData.ticket, null, '/', null, true);
 	me.onLogin(loginData);
     },
 

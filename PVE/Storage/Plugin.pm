@@ -5,6 +5,7 @@ use warnings;
 
 use File::chdir;
 use File::Path;
+use File::Basename;
 
 use PVE::Tools qw(run_command);
 use PVE::JSONSchema qw(get_standard_option);
@@ -326,7 +327,7 @@ sub parse_config {
 	    priority => 0, # force first entry
 	    path => '/var/lib/vz',
 	    maxfiles => 0,
-	    content => { images => 1, rootdir => 1, vztmpl => 1, iso => 1},
+	    content => { images => 1, rootdir => 1, vztmpl => 1, iso => 1, snippets => 1},
 	};
     }
 
@@ -421,12 +422,14 @@ sub parse_volname {
 	return ('vztmpl', $1);
     } elsif ($volname =~ m!^rootdir/(\d+)$!) {
 	return ('rootdir', $1, $1);
-    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo)))$!) {
+    } elsif ($volname =~ m!^backup/([^/]+(\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo)))$!) {
 	my $fn = $1;
 	if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
 	    return ('backup', $fn, $2);
 	}
 	return ('backup', $fn);
+    } elsif ($volname =~ m!^snippets/([^/]+)$!) {
+	return ('snippets', $1);
     }
 
     die "unable to parse directory volume name '$volname'\n";
@@ -438,6 +441,7 @@ my $vtype_subdirs = {
     iso => 'template/iso',
     vztmpl => 'template/cache',
     backup => 'dump',
+    snippets => 'snippets',
 };
 
 sub get_subdir {
@@ -661,7 +665,12 @@ sub alloc_image {
 	
 	push @$cmd, '-f', $fmt, $path, "${size}K";
 
-	run_command($cmd, errmsg => "unable to create image");
+	eval { run_command($cmd, errmsg => "unable to create image"); };
+	if ($@) {
+	    unlink $path;
+	    rmdir $imagedir;
+	    die "$@";
+	}
     }
     
     return "$vmid/$name";
@@ -689,6 +698,11 @@ sub free_image {
 
 	unlink($path) || die "unlink '$path' failed - $!\n";
     }
+
+    # try to cleanup directory to not clutter storage with empty $vmid dirs if
+    # all images from a guest got deleted
+    my $dir = dirname($path);
+    rmdir($dir);
     
     return undef;
 }
@@ -952,7 +966,8 @@ sub deactivate_storage {
 sub map_volume {
     my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    return undef;
+    my ($path) = $class->path($scfg, $volname, $storeid, $snapname);
+    return $path;
 }
 
 sub unmap_volume {

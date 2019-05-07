@@ -399,7 +399,8 @@ sub check_volume_access {
     if ($sid) {
 	my ($vtype, undef, $ownervm) = parse_volname($cfg, $volid);
 	if ($vtype eq 'iso' || $vtype eq 'vztmpl') {
-	    # we simply allow access
+	    # require at least read access to storage, (custom) templates/ISOs could be sensitive
+	    $rpcenv->check_any($user, "/storage/$sid", ['Datastore.AllocateSpace', 'Datastore.Audit']);
 	} elsif (defined($ownervm) && defined($vmid) && ($ownervm == $vmid)) {
 	    # we are owner - allow access
 	} elsif ($vtype eq 'backup' && $ownervm) {
@@ -511,7 +512,7 @@ sub path_to_volume_id {
 	} elsif ($path =~ m!^$privatedir/(\d+)$!) {
 	    my $vmid = $1;
 	    return ('rootdir', "$sid:rootdir/$vmid");
-	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!) {
+	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!) {
 	    my $name = $1;
 	    return ('iso', "$sid:backup/$name");
 	}
@@ -772,6 +773,48 @@ sub vdisk_free {
     $rpcenv->fork_worker('imgdel', undef, $authuser, $cleanup_worker);
 }
 
+# lists all files in the snippets directory
+sub snippets_list {
+    my ($cfg, $storeid) = @_;
+
+    my $ids = $cfg->{ids};
+
+    storage_check_enabled($cfg, $storeid) if ($storeid);
+
+    my $res = {};
+
+    foreach my $sid (keys %$ids) {
+	next if $storeid && $storeid ne $sid;
+	next if !storage_check_enabled($cfg, $sid, undef, 1);
+
+	my $scfg = $ids->{$sid};
+	next if !$scfg->{content}->{snippets};
+
+	activate_storage($cfg, $sid);
+
+	if ($scfg->{path}) {
+	    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+	    my $path = $plugin->get_subdir($scfg, 'snippets');
+
+	    foreach my $fn (<$path/*>) {
+		next if -d $fn;
+
+		push @{$res->{$sid}}, {
+		    volid => "$sid:snippets/". basename($fn),
+		    format => 'snippet',
+		    size => -s $fn,
+		};
+	    }
+	}
+
+	if ($res->{$sid}) {
+	    @{$res->{$sid}} = sort {$a->{volid} cmp $b->{volid} } @{$res->{$sid}};
+	}
+    }
+
+    return $res;
+}
+
 #list iso or openvz template ($tt = <iso|vztmpl|backup>)
 sub template_list {
     my ($cfg, $storeid, $tt) = @_;
@@ -821,7 +864,7 @@ sub template_list {
 		    $info = { volid => "$sid:vztmpl/$1", format => "t$2" };
 
 		} elsif ($tt eq 'backup') {
-		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!;
+		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!;
 
 		    $info = { volid => "$sid:backup/$1", format => $2 };
 		}
@@ -887,7 +930,7 @@ sub vdisk_list {
 sub volume_list {
     my ($cfg, $storeid, $vmid, $content) = @_;
 
-    my @ctypes = qw(images vztmpl iso backup);
+    my @ctypes = qw(images vztmpl iso backup snippets);
 
     my $cts = $content ? [ $content ] : [ @ctypes ];
 
@@ -909,6 +952,8 @@ sub volume_list {
 		    @{$data->{$storeid}} = grep { $_->{volid} =~ m/\S+-$vmid-\S+/ } @{$data->{$storeid}};
 		}
 	    }
+	} elsif ($ct eq 'snippets') {
+	    $data = snippets_list($cfg, $storeid);
 	}
 
 	next if !$data || !$data->{$storeid};
@@ -1319,30 +1364,13 @@ sub foreach_volid {
     }
 }
 
-sub get_full_backup {
-    my ($archive) = @_;
-    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
-        my $fullbackup = $archive;
-        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
-        return $fullbackup;
-    }
-    return undef;
-}
-
 sub extract_vzdump_config_tar {
     my ($archive, $conf_re) = @_;
 
     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
 
-    my $pid;
-    my $fh;
-
-    if (my $fullbackup = get_full_backup($archive)) {
-        $pid = open($fh, '-|', 'bash', '-c' , "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' | tar tf -")
-            || die "unable to open file '$archive'\n";
-    } else {
-        $pid = open($fh, '-|', 'tar', 'tf', $archive) || die "unable to open file '$archive'\n";
-    }
+    my $pid = open(my $fh, '-|', 'tar', 'tf', $archive) ||
+       die "unable to open file '$archive'\n";
 
     my $file;
     while (defined($file = <$fh>)) {
@@ -1365,15 +1393,7 @@ sub extract_vzdump_config_tar {
 	$raw .= "$output\n";
     };
 
-    my $cmd = ['tar', '-xpOf', $archive, $file, '--occurrence'];
-    if (my $fullbackup = get_full_backup($archive)) {
-        $cmd = [
-            [ "bash", "-c", "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' || true" ],
-            [ 'tar', '-xpOf', '-', $file, '--occurrence' ]
-        ];
-    }
-
-    PVE::Tools::run_command($cmd, outfunc => $out);
+    PVE::Tools::run_command(['tar', '-xpOf', $archive, $file, '--occurrence'], outfunc => $out);
 
     return wantarray ? ($raw, $file) : $raw;
 }
@@ -1543,7 +1563,7 @@ sub complete_storage_enabled {
 sub complete_content_type {
     my ($cmdname, $pname, $cvalue) = @_;
 
-    return [qw(rootdir images vztmpl iso backup)];
+    return [qw(rootdir images vztmpl iso backup snippets)];
 }
 
 sub complete_volume {
@@ -1615,7 +1635,7 @@ sub get_bandwidth_limit {
     }
 
     # Apply per-storage limits - if there are storages involved.
-    if (@$storage_list) {
+    if (defined($storage_list) && @$storage_list) {
 	my $config = config();
 
 	# The Datastore.Allocate permission allows us to modify the per-storage
@@ -1626,6 +1646,7 @@ sub get_bandwidth_limit {
 
 	my %done;
 	foreach my $storage (@$storage_list) {
+	    next if !defined($storage);
 	    # Avoid duplicate checks:
 	    next if $done{$storage};
 	    $done{$storage} = 1;

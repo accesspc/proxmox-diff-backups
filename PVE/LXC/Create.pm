@@ -108,15 +108,7 @@ sub restore_archive {
     push @$cmd, '--exclude' , './dev/*';
 
     if (defined($bwlimit)) {
-		$cmd = [ ['cstream', '-t', $bwlimit*1024], $cmd ];
-	}
-
-	if (my $fullbackup = PVE::Storage::get_full_backup($archive)) {
-		print "extracting from differential archive, using full backup '$fullbackup'\n";
-		$cmd = [
-			[ "pve-xdelta3", "-q", "-d", "-c", "-R", "-s", $fullbackup, $archive ],
-			[ @$userns_cmd, 'tar', 'xpf', '-', '--numeric-owner', '--totals', '--sparse', '-C', $rootdir, '--skip-old-files', '--anchored', '--exclude' , './dev/*' ]
-		];
+	$cmd = [ ['cstream', '-t', $bwlimit*1024], $cmd ];
     }
 
     if ($archive eq '-') {
@@ -167,7 +159,7 @@ sub recover_config {
 }
 
 sub restore_configuration {
-    my ($vmid, $rootdir, $conf, $restricted) = @_;
+    my ($vmid, $rootdir, $conf, $restricted, $unique) = @_;
 
     # restore: try to extract configuration from archive
 
@@ -190,6 +182,13 @@ sub restore_configuration {
 		    warn "$lxc_opt->[0]: $lxc_opt->[1]\n"
 		}
 		warn "--------------------------------\n";
+		next;
+	    }
+	    if ($unique && $key =~ /^net\d+$/) {
+		my $net = PVE::LXC::Config->parse_lxc_network($oldconf->{$key});
+		my $dc = PVE::Cluster::cfs_read_file('datacenter.cfg');
+		$net->{hwaddr} = PVE::Tools::random_ether_addr($dc->{mac_prefix});
+		$conf->{$key} = PVE::LXC::Config->print_lxc_network($net);
 		next;
 	    }
 	    $conf->{$key} = $oldconf->{$key} if !defined($conf->{$key});
