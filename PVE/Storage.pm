@@ -512,7 +512,7 @@ sub path_to_volume_id {
 	} elsif ($path =~ m!^$privatedir/(\d+)$!) {
 	    my $vmid = $1;
 	    return ('rootdir', "$sid:rootdir/$vmid");
-	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!) {
+	} elsif ($path =~ m!^$backupdir/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!) {
 	    my $name = $1;
 	    return ('iso', "$sid:backup/$name");
 	}
@@ -864,7 +864,7 @@ sub template_list {
 		    $info = { volid => "$sid:vztmpl/$1", format => "t$2" };
 
 		} elsif ($tt eq 'backup') {
-		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo))$!;
+		    next if $fn !~ m!/([^/]+\.(tar|tar\.gz|tar\.lzo|tgz|vma|vma\.gz|vma\.lzo|vcdiff|vcdiff\.gz|vcdiff\.lzo))$!;
 
 		    $info = { volid => "$sid:backup/$1", format => $2 };
 		}
@@ -1364,13 +1364,30 @@ sub foreach_volid {
     }
 }
 
+sub get_full_backup {
+    my ($archive) = @_;
+    if ($archive =~ m!([^/]*vzdump-([a-z]*)-(\d*)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?$!) {
+        my $fullbackup = $archive;
+        $fullbackup =~ s!([^/]*vzdump-([a-z]+)-(\d+)-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.(tgz|(tar(\.(gz|lzo))?)))--differential-(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})\.vcdiff(\.(gz|lzo))?!$1!;
+        return $fullbackup;
+    }
+    return undef;
+}
+
 sub extract_vzdump_config_tar {
     my ($archive, $conf_re) = @_;
 
     die "ERROR: file '$archive' does not exist\n" if ! -f $archive;
 
-    my $pid = open(my $fh, '-|', 'tar', 'tf', $archive) ||
-       die "unable to open file '$archive'\n";
+    my $pid;
+    my $fh;
+
+    if (my $fullbackup = get_full_backup($archive)) {
+        $pid = open($fh, '-|', 'bash', '-c' , "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' | tar tf -")
+            || die "unable to open file '$archive'\n";
+    } else {
+        $pid = open($fh, '-|', 'tar', 'tf', $archive) || die "unable to open file '$archive'\n";
+    }
 
     my $file;
     while (defined($file = <$fh>)) {
@@ -1393,7 +1410,15 @@ sub extract_vzdump_config_tar {
 	$raw .= "$output\n";
     };
 
-    PVE::Tools::run_command(['tar', '-xpOf', $archive, $file, '--occurrence'], outfunc => $out);
+    my $cmd = ['tar', '-xpOf', $archive, $file, '--occurrence'];
+    if (my $fullbackup = get_full_backup($archive)) {
+        $cmd = [
+            [ "bash", "-c", "pve-xdelta3 -q -d -c -R -s '$fullbackup' '$archive' || true" ],
+            [ 'tar', '-xpOf', '-', $file, '--occurrence' ]
+        ];
+    }
+
+    PVE::Tools::run_command($cmd, outfunc => $out);
 
     return wantarray ? ($raw, $file) : $raw;
 }

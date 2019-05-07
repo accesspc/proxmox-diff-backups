@@ -36388,7 +36388,26 @@ Ext.define('PVE.dc.BackupEdit', {
 		fieldLabel: gettext('Mode'),
 		value: 'snapshot',
 		name: 'mode'
-	    },
+		},
+		{
+		xtype: 'numberfield',
+		fieldLabel: gettext('Max Backups'),
+		name: 'maxfiles',
+		minValue: 0,
+		maxValue: 365,
+		value: me.create ? '1' : undefined,
+		allowBlank: false
+		},
+		{
+		xtype: 'numberfield',
+		fieldLabel: gettext('Full Backup Every'),
+		name: 'fullbackup',
+		emptyText : gettext('Days'),
+		minValue: 0,
+		maxValue: 60,
+		value: me.create ? '0' : undefined,
+		allowBlank: true
+		},
 	    {
 		xtype: 'proxmoxcheckbox',
 		fieldLabel: gettext('Enable'),
