@@ -395,53 +395,62 @@ EOF
 }
 
 function patch_revert() {
-        patch --reverse --quiet -p1 --batch --ignore-whitespace -d $*
+    patch --reverse --quiet -p1 --batch --ignore-whitespace -d $*
 }
 
 function patch_apply() {
-        patch --forward -p1 --batch --ignore-whitespace -d $*
+       patch --forward -p1 --batch --ignore-whitespace -d $*
+}
+
+function pkg_install() {
+    wget -nv -O /tmp/pve-xdelta3_3.0.6-1_amd64.deb http://ayufan.eu/projects/proxmox-ve-differential-backups/pve-xdelta3_3.0.6-1_amd64.deb
+    dpkg -i /tmp/pve-xdelta3_3.0.6-1_amd64.deb
 }
 
 case $1 in
 revert)
-        if pve_manager_patch | patch_revert /usr/share/ --dry-run
-        then
-                pve_manager_patch | patch_revert /usr/share/
-                echo "RESTORED: /usr/share/"
-        fi
-        if pve_perl_patch | patch_revert /usr/share/perl5/ --dry-run
-        then
-                pve_perl_patch | patch_revert /usr/share/perl5/
-                echo "RESTORED: /usr/share/perl5/"
-        fi
-        echo ""
-        service pveproxy restart
-        service pvedaemon restart
-        ;;
+    if pve_manager_patch | patch_revert /usr/share/ --dry-run
+    then
+        pve_manager_patch | patch_revert /usr/share/
+        echo "RESTORED: /usr/share/"
+    fi
+    if pve_perl_patch | patch_revert /usr/share/perl5/ --dry-run
+    then
+        pve_perl_patch | patch_revert /usr/share/perl5/
+        echo "RESTORED: /usr/share/perl5/"
+    fi
+    echo ""
+    service pveproxy restart
+    service pvedaemon restart
+    ;;
 
 apply)
-        if pve_manager_patch | patch_apply /usr/share/ --dry-run --batch
-        then
-                pve_manager_patch | patch_apply /usr/share/
-                echo "PATCHED: /usr/share/"
-        fi
-        if pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch
-        then
-                pve_perl_patch | patch_apply /usr/share/perl5/
-                echo "PATCHED: /usr/share/perl5/"
-        fi
-        echo ""
-        service pveproxy restart
-        service pvedaemon restart
-        ;;
+    if pve_manager_patch | patch_apply /usr/share/ --dry-run --batch
+    then
+        pve_manager_patch | patch_apply /usr/share/
+        echo "PATCHED: /usr/share/"
+    fi
+    if pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch
+    then
+        pve_perl_patch | patch_apply /usr/share/perl5/
+        echo "PATCHED: /usr/share/perl5/"
+    fi
+    echo ""
+    service pveproxy restart
+    service pvedaemon restart
+    ;;
 
 test)
-        pve_manager_patch | patch_apply /usr/share/ --dry-run --batch || true
-        pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch || true
-        ;;
+    pve_manager_patch | patch_apply /usr/share/ --dry-run --batch || true
+    pve_perl_patch | patch_apply /usr/share/perl5/ --dry-run --batch || true
+    ;;
+
+pkginstall)
+    pkg_install
+    ;;
 
 *)
-        echo "usage: $0 [apply|revert|test]"
-        exit 1
-        ;;
+    echo "usage: $0 [apply|revert|test|pkginstall]"
+    exit 1
+    ;;
 esac
