@@ -36395,7 +36395,7 @@ Ext.define('PVE.dc.BackupEdit', {
 		name: 'maxfiles',
 		minValue: 0,
 		maxValue: 365,
-		value: me.create ? '1' : undefined,
+		value: me.isCreate ? '1' : undefined,
 		allowBlank: false
 		},
 		{
@@ -36405,7 +36405,7 @@ Ext.define('PVE.dc.BackupEdit', {
 		emptyText : gettext('Days'),
 		minValue: 0,
 		maxValue: 60,
-		value: me.create ? '0' : undefined,
+		value: me.isCreate ? '0' : undefined,
 		allowBlank: true
 		},
 	    {

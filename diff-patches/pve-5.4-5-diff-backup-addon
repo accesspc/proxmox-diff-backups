@@ -1,9 +1,9 @@
 #!/bin/bash
 
-echo "Proxmox VE 5.3 - differential backup support, v1.1"
+echo "Proxmox VE 5.4 - differential backup support, v1.1"
 echo "Robertas Reiciunas, https://reiciunas.lt/, accesspc@gmail.com"
 echo " based on Kamil Trzcinski, http://ayufan.eu/, ayufan@ayufan.eu"
-echo " modified and tested on pve-manager/5.3-6/37b3c8df (running kernel: 4.15.18-8-pve)"
+echo " modified and tested on pve-manager/5.4-5/c6fdb264 (running kernel: 4.15.18-14-pve)"
 echo ""
 
 function pve_manager_patch() {
@@ -24,7 +24,7 @@ index 54e7f6c..2b6a2b2 100644
 +		name: 'maxfiles',
 +		minValue: 0,
 +		maxValue: 365,
-+		value: me.create ? '1' : undefined,
++		value: me.isCreate ? '1' : undefined,
 +		allowBlank: false
 +		},
 +		{
@@ -34,7 +34,7 @@ index 54e7f6c..2b6a2b2 100644
 +		emptyText : gettext('Days'),
 +		minValue: 0,
 +		maxValue: 60,
-+		value: me.create ? '0' : undefined,
++		value: me.isCreate ? '0' : undefined,
 +		allowBlank: true
 +		},
  	    {
