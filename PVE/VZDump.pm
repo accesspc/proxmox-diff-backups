@@ -810,12 +810,11 @@ sub exec_backup_task {
 	}
 
     my $fullbackup = undef;
-	my $lt = undef;
     if ($opts->{fullbackup} && !$opts->{stdout}) {
         my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
         $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
-        my $mintime = timelocal ($lt->sec, $lt->min, $lt->hour,
-        $lt->mday, $lt->mon, $lt->year) -
+        my $mintime = timelocal ($ltsec, $ltmin, $lthour,
+        $ltmday, $ltmon, $ltyear) -
         $opts->{fullbackup} * 24 * 60 * 60 -
         12 * 60 * 60; # - 12h just to make sure that on last day we create full backup
 
@@ -825,8 +824,8 @@ sub exec_backup_task {
         $fullbackup = $d->[0];
         $basename = basename($fullbackup);
         $basename = sprintf "${basename}--differential-%04d_%02d_%02d-%02d_%02d_%02d",
-            $lt->year + 1900, $lt->mon + 1, $lt->mday,
-            $lt->hour, $lt->min, $lt->sec;
+            $ltyear + 1900, $ltmon + 1, $ltmday,
+            $lthour, $ltmin, $ltsec;
         $ext = ".vcdiff";
 
         debugmsg ('info', "doing differential backup against '$fullbackup'");
