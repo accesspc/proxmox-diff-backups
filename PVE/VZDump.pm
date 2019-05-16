@@ -810,6 +810,7 @@ sub exec_backup_task {
 	}
 
     my $fullbackup = undef;
+    my ($ltsec, $ltmin, $lthour, $ltmday, $ltmon, $ltyear) = localtime();
     if ($opts->{fullbackup} && !$opts->{stdout}) {
         my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
         $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];

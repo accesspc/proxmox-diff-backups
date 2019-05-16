@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Proxmox VE 5.4 - differential backup support, v1.2"
+echo "Proxmox VE 5.4 - differential backup support, v1.3"
 echo "Robertas Reiciunas, https://reiciunas.lt/, accesspc@gmail.com"
 echo " based on Kamil Trzcinski, http://ayufan.eu/, ayufan@ayufan.eu"
 echo " modified and tested on pve-manager/5.4-5/c6fdb264 (running kernel: 4.15.18-14-pve)"
@@ -213,7 +213,7 @@ index cca0ed8..ef9575b 100644
  	if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
  	    return ('backup', $fn, $2);
 diff --git a/PVE/VZDump.pm b/PVE/VZDump.pm
-index 6508c83..b77f80a 100644
+index 6508c83..79b3762 100644
 --- a/PVE/VZDump.pm
 +++ b/PVE/VZDump.pm
 @@ -8,6 +8,7 @@ use IO::File;
@@ -261,7 +261,7 @@ index 6508c83..b77f80a 100644
   
  sub exec_backup_task {
      my ($self, $task) = @_;
-@@ -779,14 +803,41 @@ sub exec_backup_task {
+@@ -779,14 +803,42 @@ sub exec_backup_task {
  		if scalar(@$bklist) >= $maxfiles;
  	}
  
@@ -274,6 +274,7 @@ index 6508c83..b77f80a 100644
  	}
  
 +    my $fullbackup = undef;
++    my ($ltsec, $ltmin, $lthour, $ltmday, $ltmon, $ltyear) = localtime();
 +    if ($opts->{fullbackup} && !$opts->{stdout}) {
 +        my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname);
 +        $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
@@ -305,7 +306,7 @@ index 6508c83..b77f80a 100644
  	if ($opts->{stdout}) {
  	    $task->{tarfile} = '-';
  	} else {
-@@ -954,7 +1005,7 @@ sub exec_backup_task {
+@@ -954,7 +1006,7 @@ sub exec_backup_task {
  
  	if ($opts->{stdout}) {
  	    debugmsg ('info', "sending archive to stdout", $logfd);
@@ -314,7 +315,7 @@ index 6508c83..b77f80a 100644
  	    $self->run_hook_script ('backup-end', $task, $logfd);
  	    return;
  	}
-@@ -972,7 +1023,7 @@ sub exec_backup_task {
+@@ -972,7 +1024,7 @@ sub exec_backup_task {
  
  	# purge older backup
  
@@ -323,7 +324,7 @@ index 6508c83..b77f80a 100644
  	    my $bklist = get_backup_file_list($opts->{dumpdir}, $bkname, $task->{tarfile});
  	    $bklist = [ sort { $b->[1] <=> $a->[1] } @$bklist ];
  
-@@ -983,6 +1034,16 @@ sub exec_backup_task {
+@@ -983,6 +1035,16 @@ sub exec_backup_task {
  		my $logfn = $d->[0];
  		$logfn =~ s/\.(tgz|((tar|vma)(\.(gz|lzo))?))$/\.log/;
  		unlink $logfn;
